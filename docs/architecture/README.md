@@ -126,6 +126,10 @@ contract is proven. They may be revisited through new ADRs.
 | [0008](decisions/0008-sync-planning-async-execution.md) | Keep planning synchronous and make async execution explicit | Accepted |
 | [0009](decisions/0009-use-uv.md) | Use uv for dependency and contributor workflows | Accepted |
 | [0010](decisions/0010-optional-integration-boundaries.md) | Isolate optional integrations and defer plugin discovery | Accepted |
+| [0011](decisions/0011-duckdb-local-engine.md) | Use DuckDB as the local execution engine | Accepted |
+| [0012](decisions/0012-first-release-scope.md) | First release scope, supported platforms, and licence | Accepted |
+| [0013](decisions/0013-credential-model.md) | Credentials stay inside adapters as opaque, redacted values | Accepted |
+| [0014](decisions/0014-clean-break-from-legacy-connectors.md) | Clean break from the legacy connectors library | Accepted |
 
 ## Change policy
 
