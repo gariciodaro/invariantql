@@ -19,3 +19,6 @@ spark-warehouse/
 metastore_db/
 derby.log
 .tmp/
+
+# Local integration credentials (the adjacent .env.example is safe to track)
+scripts/integration/.env
