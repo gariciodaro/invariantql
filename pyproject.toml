@@ -1,26 +1,38 @@
 [build-system]
-requires = ["hatchling>=1.25"]
+requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
 name = "invariantql"
 version = "0.1.0"
-description = "Write a read-only logical query once, preview it locally with DuckDB, and compile the same plan for Spark across file-backed and database sources."
-readme = "README.md"
+description = "Explainable, read-only SQL across files, object storage, and databases with DuckDB and Spark."
+readme = { file = "README.md", content-type = "text/markdown" }
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [{ name = "Gari Ciodaro Guerra" }]
-keywords = ["query", "logical-plan", "duckdb", "spark", "arrow", "pushdown", "ports-and-adapters"]
+keywords = [
+  "sql",
+  "data-exploration",
+  "data-engineering",
+  "query-planning",
+  "duckdb",
+  "spark",
+  "arrow",
+  "pushdown",
+  "data-lake",
+]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: Apache Software License",
+  "Intended Audience :: Information Technology",
+  "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Topic :: Database",
+  "Topic :: Software Development :: Libraries :: Python Modules",
   "Typing :: Typed",
 ]
 # The base install must import without any provider SDK (FF-02). SQLGlot is a
@@ -31,38 +43,41 @@ dependencies = [
 
 [project.optional-dependencies]
 # Local execution engine (ADR-0011) and the Arrow result boundary (ADR-0005).
-duckdb = ["duckdb>=1.2", "pyarrow>=15.0", "fsspec>=2024.3"]
+duckdb = ["duckdb>=1.2", "pyarrow>=16.0", "fsspec>=2024.3"]
 # Bounded local materialisations.
-pandas = ["pandas>=2.0", "pyarrow>=15.0"]
-polars = ["polars>=1.0", "pyarrow>=15.0"]
+pandas = ["pandas>=2.0", "pyarrow>=16.0"]
+polars = ["polars>=1.0", "pyarrow>=16.0"]
 # Distributed engine.
 spark = ["pyspark>=3.5,<4.0"]
 # Storage adapters.
 azure = ["adlfs>=2024.4", "azure-identity>=1.15", "azure-storage-blob>=12.19", "fsspec>=2024.3"]
 s3 = ["s3fs>=2024.4", "fsspec>=2024.3"]
-sftp = ["paramiko>=3.4", "fsspec>=2024.3"]
+sftp = ["paramiko>=3.5.1", "fsspec>=2024.3"]
 # Native query sources.
-postgres = ["psycopg[binary]>=3.1", "pyarrow>=15.0"]
-mysql = ["pymysql[rsa]>=1.1", "pyarrow>=15.0"]
-mongodb = ["pymongo>=4.6", "pyarrow>=15.0"]
-neo4j = ["neo4j>=5.15", "pyarrow>=15.0"]
+postgres = ["psycopg[binary]>=3.1", "pyarrow>=16.0"]
+mysql = ["pymysql[rsa]>=1.1", "pyarrow>=16.0"]
+mongodb = ["pymongo>=4.6", "pyarrow>=16.0"]
+neo4j = ["neo4j>=5.15", "pyarrow>=16.0"]
 # Table formats that need their own reader library locally.
-xml = ["defusedxml>=0.7", "pyarrow>=15.0"]
-delta = ["deltalake>=0.18", "pyarrow>=15.0"]
-iceberg = ["pyiceberg>=0.7", "pyarrow>=15.0"]
+xml = ["defusedxml>=0.7", "pyarrow>=16.0"]
+delta = ["deltalake>=0.18", "pyarrow>=16.0"]
+iceberg = ["pyiceberg[pyarrow]>=0.12", "pyarrow>=18.0"]
 all = [
   "invariantql[duckdb,pandas,polars,spark,azure,s3,sftp,postgres,mysql,mongodb,neo4j,xml,delta,iceberg]",
 ]
 
 [project.urls]
 Homepage = "https://github.com/gariciodaro/invariantql"
+Documentation = "https://github.com/gariciodaro/invariantql#readme"
+Repository = "https://github.com/gariciodaro/invariantql"
+Issues = "https://github.com/gariciodaro/invariantql/issues"
 
 [dependency-groups]
 dev = [
   "pytest>=8.2",
   "pytest-timeout>=2.3",
   "hypothesis>=6.100",
-  "ruff>=0.6",
+  "ruff>=0.16.6",
   "pyright>=1.1.380",
   "import-linter>=2.0",
 ]

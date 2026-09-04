@@ -41,9 +41,10 @@ dependency isolation supplies evidence for separate packages.
 
 ### Provider-centered inheritance hierarchy
 
-A common base connector with subclasses is familiar and quick for the first few
-integrations. It becomes brittle when sources vary across several independent
-axes and tends to force unused methods or provider conditionals into the base.
+A common base integration class with subclasses is familiar and quick for the
+first few providers. It becomes brittle when sources vary across several
+independent axes and tends to force unused methods or provider conditionals
+into the base.
 
 ### Microservices or separately deployed engines
 
@@ -90,4 +91,3 @@ not a least-common-denominator mirror of SDKs.
 - Independent teams need incompatible release cadences.
 - An adapter cannot be isolated from the base environment within one wheel.
 - A remote execution/control plane becomes an explicit product requirement.
-

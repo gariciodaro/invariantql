@@ -1,9 +1,10 @@
 """Spark execution engine (ADR-0005, FF-08).
 
-``compile`` returns a lazy ``pyspark.sql.DataFrame`` and performs no action.
-The adapter never mutates the user's ``SparkSession``; storage credentials
-reach Hadoop only through the explicit :meth:`SparkEngine.apply_storage_credentials`
-helper.
+After schema binding, ``compile`` returns a lazy ``pyspark.sql.DataFrame`` and
+performs no collection or write action. Schema discovery happens before this
+engine boundary and may run format-specific inference. The adapter never
+mutates the user's ``SparkSession``; storage credentials reach Hadoop only
+through the explicit :meth:`SparkEngine.apply_storage_credentials` helper.
 """
 
 from __future__ import annotations
@@ -120,7 +121,10 @@ class SparkEngine:
         return EngineCapabilities(
             self._name,
             lazy=True,
-            evidence=("Spark evaluates residual work lazily; compile() performs no action",),
+            evidence=(
+                "Spark evaluates residual work lazily; after schema binding, compile() "
+                "performs no collection or write action",
+            ),
         )
 
     def reachability(self, source: DataSource) -> Reachability:

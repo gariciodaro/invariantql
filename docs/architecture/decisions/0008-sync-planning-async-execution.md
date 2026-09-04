@@ -81,7 +81,7 @@ of assuming a particular scheduler or loop implementation.
 ## Fitness functions
 
 - [FF-04: deterministic immutable plans](../fitness-functions.md#ff-04-deterministic-immutable-plans)
-- [FF-08: no implicit Spark action or collection](../fitness-functions.md#ff-08-no-implicit-spark-action-or-collection)
+- [FF-08: no implicit Spark collection or output action](../fitness-functions.md#ff-08-no-implicit-spark-collection-or-output-action)
 - [FF-13: resource lifecycle](../fitness-functions.md#ff-13-resource-lifecycle)
 
 ## Revisit when
@@ -91,4 +91,3 @@ of assuming a particular scheduler or loop implementation.
 - Metadata latency requires concurrent planning preparation.
 - Python's execution model offers a stable interface that unifies both modes
   without hiding lifecycle differences.
-

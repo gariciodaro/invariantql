@@ -6,11 +6,11 @@
 
 ## Context
 
-SQL is the closest common language for the original user problem: consultants
-should not relearn retrieval APIs for every source. It is also a large family of
-dialects with semantic differences. Implementing a parser is outside the
-project's differentiating value, but allowing parser-specific AST nodes into the
-domain would bind core semantics and public compatibility to a third party.
+SQL is the closest common language for data practitioners who should not need
+to learn a retrieval API for every source. It is also a large family of dialects
+with semantic differences. Implementing a parser is outside the project's
+differentiating value, but allowing parser-specific AST nodes into the domain
+would bind core semantics and public compatibility to a third party.
 
 Accepting arbitrary SQL would imply joins, subqueries, writes, vendor functions,
 and semantics that the initial execution model cannot honor consistently.
@@ -30,14 +30,15 @@ syntax into domain-owned expression and plan nodes. No SQLGlot AST object crosse
 the frontend boundary or appears in public/domain types.
 
 The initial profile is a single-source `SELECT` with projection, filtering,
-boolean composition, and limit. Exact supported expressions and null/type
-semantics will be published with the implementation. DDL, DML, multi-statement
-input, unsupported dialect constructs, and ambiguous identifiers are rejected
-before source execution.
+boolean composition, and limit. The supported expressions and null/type
+semantics are documented and covered by conformance tests. DDL, DML,
+multi-statement input, unsupported dialect constructs, and ambiguous identifiers
+are rejected before source execution.
 
-Values use parameters. Database adapters generate native SQL using bound
-parameters; values are never interpolated into query strings. A typed expression
-builder may be added as a peer frontend to the same plan.
+Values use parameters. Relational SQL and Cypher adapters use driver-bound
+parameters; MongoDB retains typed BSON query values. Values are never
+interpolated into generated query strings. The typed expression builder is a
+peer entry point to the same plan.
 
 ## Alternatives considered
 
@@ -91,4 +92,3 @@ source or engine adapter.
   tested upgrades.
 - A second frontend exposes semantic gaps in the domain plan.
 - User evidence justifies a broader SQL profile and its conformance cost.
-

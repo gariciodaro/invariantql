@@ -940,12 +940,12 @@ def test_scan_bypasses_pyicebergs_parallel_batch_materialisation(
 
 
 def test_batch_reader_never_falls_back_to_an_eager_arrow_table() -> None:
-    class UnsupportedLegacyScan:
+    class UnsupportedEagerScan:
         def to_arrow(self) -> Any:
             raise AssertionError("the full table was materialised")
 
     with pytest.raises(UnsupportedOperationError) as info:
-        iceberg_module._batch_reader(UnsupportedLegacyScan())
+        iceberg_module._batch_reader(UnsupportedEagerScan())
     assert info.value.code is DiagnosticCode.FORMAT_UNSUPPORTED
 
 

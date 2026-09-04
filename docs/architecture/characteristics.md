@@ -99,7 +99,7 @@ The common workflow should not require backend type checks: construct one plan,
 preview it locally, validate it, and compile it for Spark. Errors name the
 unsupported operation and target.
 
-**Trade-off:** Backend choice is explicit. InvariantQL will not guess whether a
+**Trade-off:** Backend choice is explicit. InvariantQL does not guess whether a
 caller intended local collection or distributed execution.
 
 ## Quality-attribute scenarios

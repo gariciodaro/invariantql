@@ -1313,7 +1313,7 @@ all = [
     { name = "polars" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pyarrow" },
-    { name = "pyiceberg" },
+    { name = "pyiceberg", extra = ["pyarrow"] },
     { name = "pymongo" },
     { name = "pymysql", extra = ["rsa"] },
     { name = "pyspark" },
@@ -1336,7 +1336,7 @@ duckdb = [
 ]
 iceberg = [
     { name = "pyarrow" },
-    { name = "pyiceberg" },
+    { name = "pyiceberg", extra = ["pyarrow"] },
 ]
 mongodb = [
     { name = "pyarrow" },
@@ -1404,20 +1404,20 @@ requires-dist = [
     { name = "invariantql", extras = ["duckdb", "pandas", "polars", "spark", "azure", "s3", "sftp", "postgres", "mysql", "mongodb", "neo4j", "xml", "delta", "iceberg"], marker = "extra == 'all'" },
     { name = "neo4j", marker = "extra == 'neo4j'", specifier = ">=5.15" },
     { name = "pandas", marker = "extra == 'pandas'", specifier = ">=2.0" },
-    { name = "paramiko", marker = "extra == 'sftp'", specifier = ">=3.4" },
+    { name = "paramiko", marker = "extra == 'sftp'", specifier = ">=3.5.1" },
     { name = "polars", marker = "extra == 'polars'", specifier = ">=1.0" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.1" },
-    { name = "pyarrow", marker = "extra == 'delta'", specifier = ">=15.0" },
-    { name = "pyarrow", marker = "extra == 'duckdb'", specifier = ">=15.0" },
-    { name = "pyarrow", marker = "extra == 'iceberg'", specifier = ">=15.0" },
-    { name = "pyarrow", marker = "extra == 'mongodb'", specifier = ">=15.0" },
-    { name = "pyarrow", marker = "extra == 'mysql'", specifier = ">=15.0" },
-    { name = "pyarrow", marker = "extra == 'neo4j'", specifier = ">=15.0" },
-    { name = "pyarrow", marker = "extra == 'pandas'", specifier = ">=15.0" },
-    { name = "pyarrow", marker = "extra == 'polars'", specifier = ">=15.0" },
-    { name = "pyarrow", marker = "extra == 'postgres'", specifier = ">=15.0" },
-    { name = "pyarrow", marker = "extra == 'xml'", specifier = ">=15.0" },
-    { name = "pyiceberg", marker = "extra == 'iceberg'", specifier = ">=0.7" },
+    { name = "pyarrow", marker = "extra == 'delta'", specifier = ">=16.0" },
+    { name = "pyarrow", marker = "extra == 'duckdb'", specifier = ">=16.0" },
+    { name = "pyarrow", marker = "extra == 'iceberg'", specifier = ">=18.0" },
+    { name = "pyarrow", marker = "extra == 'mongodb'", specifier = ">=16.0" },
+    { name = "pyarrow", marker = "extra == 'mysql'", specifier = ">=16.0" },
+    { name = "pyarrow", marker = "extra == 'neo4j'", specifier = ">=16.0" },
+    { name = "pyarrow", marker = "extra == 'pandas'", specifier = ">=16.0" },
+    { name = "pyarrow", marker = "extra == 'polars'", specifier = ">=16.0" },
+    { name = "pyarrow", marker = "extra == 'postgres'", specifier = ">=16.0" },
+    { name = "pyarrow", marker = "extra == 'xml'", specifier = ">=16.0" },
+    { name = "pyiceberg", extras = ["pyarrow"], marker = "extra == 'iceberg'", specifier = ">=0.12" },
     { name = "pymongo", marker = "extra == 'mongodb'", specifier = ">=4.6" },
     { name = "pymysql", extras = ["rsa"], marker = "extra == 'mysql'", specifier = ">=1.1" },
     { name = "pyspark", marker = "extra == 'spark'", specifier = ">=3.5,<4.0" },
@@ -1433,7 +1433,7 @@ dev = [
     { name = "pyright", specifier = ">=1.1.380" },
     { name = "pytest", specifier = ">=8.2" },
     { name = "pytest-timeout", specifier = ">=2.3" },
-    { name = "ruff", specifier = ">=0.6" },
+    { name = "ruff", specifier = ">=0.16.6" },
 ]
 
 [[package]]
@@ -2712,6 +2712,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/97/bf/2c2d14235fcb1a28eba3e576e3472b77ee9408b52b13a2d33937a6189ea6/pyiceberg-0.12.0-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:82e0250f6c9baa11644efa44da5f968205c158c75126deb1b1730ce158cb3f76", size = 769045, upload-time = "2026-09-01T17:28:37.858Z" },
     { url = "https://files.pythonhosted.org/packages/ed/fb/c16e5aa6810a1e2dc0907b7a7d4605701b9da537d4175736cbec0c86ffb5/pyiceberg-0.12.0-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:e73a396826d745b2a6ac0d3b5151c8cdcbb090e81bfc31f07139cb463e62dbe3", size = 772590, upload-time = "2026-09-01T17:28:39.132Z" },
     { url = "https://files.pythonhosted.org/packages/a4/57/2ae640b6220a321958484162cfbdd1a2772198bac0c4588a990b8afd22d5/pyiceberg-0.12.0-cp314-cp314-win_amd64.whl", hash = "sha256:ee7b572d209a39224a093661f462f95551b2bd3982a07aecd80c7dd560be15ea", size = 561552, upload-time = "2026-09-01T17:28:41.156Z" },
+]
+
+[package.optional-dependencies]
+pyarrow = [
+    { name = "pyarrow" },
 ]
 
 [[package]]

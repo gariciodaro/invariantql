@@ -9,9 +9,9 @@
 The domain must never hold credentials (ADR-0002), yet storage adapters need
 keys, tokens, or identity objects; native sources need passwords; and
 libraries such as delta-rs, pyiceberg, and Spark need the same secrets again
-to read the same locations. The legacy library read service-principal
-secrets from environment variables implicitly and wrote SAS tokens into the
-caller's `SparkSession` configuration.
+to read the same locations. Implicitly reading application secrets or mutating
+a caller-owned `SparkSession` would make credential flow difficult to inspect
+and control.
 
 ## Decision drivers
 
@@ -56,8 +56,8 @@ time. `CredentialRef` remains as a label so this can be added later.
 
 ### Passing secrets through plan or source options
 
-Simplest to implement and the legacy behaviour; it leaks secrets into
-serialised plans, explain output, and logs.
+This is the simplest implementation, but it leaks secrets into serialised
+plans, explain output, and logs.
 
 ## Consequences and trade-offs
 

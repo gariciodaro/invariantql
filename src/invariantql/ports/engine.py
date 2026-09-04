@@ -67,7 +67,7 @@ class CompilingExecutionEngine(ExecutionEngine, Protocol):
         source: DataSource,
         parameters: Mapping[str, Literal],
     ) -> Any:
-        """Return the engine-specific lazy relation. Performs no action."""
+        """Return a lazy relation without collecting or writing data."""
         ...
 
 

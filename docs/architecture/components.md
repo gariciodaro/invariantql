@@ -201,8 +201,9 @@ engine.
 - Local residual execution.
 - Engine-specific result boundary and lifecycle.
 
-The local engine produces streaming Arrow batches. The Spark adapter produces a
-native lazy Spark relation and must not call actions that collect data.
+The local engine produces streaming Arrow batches. After schema binding, the
+Spark adapter produces a native lazy Spark relation and must not collect or
+write data. Schema discovery remains a separate, visible inspection step.
 
 ### 10. Result and materialization boundary
 
@@ -256,7 +257,7 @@ they return new immutable plans; construction syntax does not own query state.
 
 ## Dependency rules
 
-The planned Python packages will follow these constraints:
+The Python packages follow these constraints:
 
 ```text
 invariantql.domain       -> Python standard library only
@@ -276,8 +277,7 @@ invariantql.adapters.*   -> domain + ports + third-party integration
   as a lazy Spark relation. Stable domain names replace connascence with provider
   implementation and call order.
 
-These rules will be executable architecture tests before feature code depends on
-them.
+Executable architecture tests enforce these rules as the package evolves.
 
 ## Primary execution flows
 

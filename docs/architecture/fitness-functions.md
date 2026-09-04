@@ -97,14 +97,17 @@ the durable part.
 - **Failure response:** Fix translation, narrow capability support, or document a
   deliberate semantic exception through an ADR.
 
-### FF-08: no implicit Spark action or collection
+### FF-08: no implicit Spark collection or output action
 
 - **Protects:** Scalability and predictable cost.
 - **Trigger:** Every Spark-adapter change.
-- **Mechanism:** Static AST scan plus a Spark test double whose action methods
-  fail; integration test confirms compilation remains lazy.
-- **Pass condition:** Compilation calls no `collect`, `toPandas`, `toArrow`,
-  `count`, `show`, or write action. Materialization APIs are separate and bounded.
+- **Mechanism:** Static AST scan plus a Spark test double whose collection and
+  output methods fail; an integration test confirms the returned DataFrame is
+  lazy.
+- **Pass condition:** After schema binding, compilation calls no `collect`,
+  `toPandas`, `toArrow`, `count`, `show`, or write action. Materialization APIs
+  are separate and bounded. Schema discovery is measured separately: it may
+  inspect metadata or schedule inference work when no schema is declared.
 
 ### FF-09: pushdown effectiveness probes
 

@@ -31,11 +31,13 @@ def spark_ctx(ctx, spark):
     return ctx
 
 
-def test_compile_returns_a_lazy_dataframe_without_actions(spark_ctx, monkeypatch) -> None:
+def test_compile_returns_a_lazy_dataframe_without_collection_or_write(
+    spark_ctx, monkeypatch
+) -> None:
     from pyspark.sql import DataFrame
 
     def boom(*_a, **_k):  # pragma: no cover - must never run
-        raise AssertionError("Spark action during compile")
+        raise AssertionError("Spark collection or write during compile")
 
     for action in ACTIONS:
         if hasattr(DataFrame, action):
