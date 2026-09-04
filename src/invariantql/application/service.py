@@ -23,11 +23,12 @@ from invariantql.domain.diagnostics import (
 )
 from invariantql.domain.execution import ExecutionPlan
 from invariantql.domain.explain import ExplainPlan
+from invariantql.domain.expressions import Literal
 from invariantql.domain.plan import QueryPlan
 from invariantql.domain.schema import Schema
 from invariantql.ports.engine import CompilingExecutionEngine, ExecutionEngine, LocalExecutionEngine
 from invariantql.ports.source import DataSource
-from invariantql.ports.streams import RecordBatchStream
+from invariantql.ports.streams import LocalResult
 
 DEFAULT_PREVIEW_ROWS = 1000
 DEFAULT_BATCH_SIZE = 65_536
@@ -43,6 +44,10 @@ class QueryService:
         preview_rows: int = DEFAULT_PREVIEW_ROWS,
         batch_size: int = DEFAULT_BATCH_SIZE,
     ) -> None:
+        if isinstance(preview_rows, bool) or not isinstance(preview_rows, int) or preview_rows < 0:
+            raise ValueError("preview_rows must be a non-negative integer")
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer")
         self.registry = registry
         self.planner = planner or CapabilityPlanner()
         self.default_engine = default_engine
@@ -99,8 +104,20 @@ class QueryService:
 
     def execution_plan(self, plan: QueryPlan, *, engine: str | None = None) -> ExecutionPlan:
         engine_obj = self._engine(engine)
+        return self._build_execution_plan(plan, engine_obj)
+
+    def _build_execution_plan(
+        self,
+        plan: QueryPlan,
+        engine_obj: ExecutionEngine,
+        parameters: Mapping[str, Literal] | None = None,
+    ) -> ExecutionPlan:
         source = self.registry.source(plan.source.name)
-        bound = bind_plan(plan, self._discover_schema(source, engine_obj))
+        bound = bind_plan(
+            plan,
+            self._discover_schema(source, engine_obj),
+            parameters,
+        )
         reach = engine_obj.reachability(source)
         target = PlanningTarget(
             engine_name=engine_obj.name,
@@ -128,7 +145,14 @@ class QueryService:
         engine: str | None = None,
         parameters: Mapping[str, Any] | None = None,
         batch_size: int | None = None,
-    ) -> RecordBatchStream:
+    ) -> LocalResult:
+        selected_batch_size = self.batch_size if batch_size is None else batch_size
+        if (
+            isinstance(selected_batch_size, bool)
+            or not isinstance(selected_batch_size, int)
+            or selected_batch_size <= 0
+        ):
+            raise ValueError("batch_size must be a positive integer")
         engine_obj = self._engine(engine)
         if not isinstance(engine_obj, LocalExecutionEngine):
             raise UnsupportedOperationError(
@@ -136,11 +160,11 @@ class QueryService:
                 code=DiagnosticCode.ENGINE_PLAN_NOT_EXECUTABLE,
                 target=engine_obj.name,
             )
-        execution_plan = self._executable(plan, engine_obj)
-        bound_params = bind_parameters(execution_plan.plan, parameters)
+        bound_params = bind_parameters(plan, parameters)
+        execution_plan = self._executable(plan, engine_obj, bound_params)
         source = self.registry.source(plan.source.name)
         return engine_obj.execute(
-            execution_plan, source, bound_params, batch_size=batch_size or self.batch_size
+            execution_plan, source, bound_params, batch_size=selected_batch_size
         )
 
     def preview(
@@ -150,7 +174,7 @@ class QueryService:
         rows: int | None = None,
         engine: str | None = None,
         parameters: Mapping[str, Any] | None = None,
-    ) -> RecordBatchStream:
+    ) -> LocalResult:
         bounded = plan.limit(self.preview_rows if rows is None else rows)
         return self.execute(bounded, engine=engine, parameters=parameters)
 
@@ -168,8 +192,8 @@ class QueryService:
                 code=DiagnosticCode.ENGINE_PLAN_NOT_EXECUTABLE,
                 target=engine_obj.name,
             )
-        execution_plan = self._executable(plan, engine_obj)
-        bound_params = bind_parameters(execution_plan.plan, parameters)
+        bound_params = bind_parameters(plan, parameters)
+        execution_plan = self._executable(plan, engine_obj, bound_params)
         source = self.registry.source(plan.source.name)
         return engine_obj.compile(execution_plan, source, bound_params)
 
@@ -178,8 +202,13 @@ class QueryService:
     def _engine(self, name: str | None) -> ExecutionEngine:
         return self.registry.engine(name or self.default_engine)
 
-    def _executable(self, plan: QueryPlan, engine_obj: ExecutionEngine) -> ExecutionPlan:
-        execution_plan = self.execution_plan(plan, engine=engine_obj.name)
+    def _executable(
+        self,
+        plan: QueryPlan,
+        engine_obj: ExecutionEngine,
+        parameters: Mapping[str, Literal] | None = None,
+    ) -> ExecutionPlan:
+        execution_plan = self._build_execution_plan(plan, engine_obj, parameters)
         if execution_plan.executable:
             return execution_plan
         first = (

@@ -32,6 +32,7 @@ from invariantql.domain import (
     QueryPlan,
     Scan,
     SourceRef,
+    StringType,
 )
 from invariantql.domain.expressions import (
     expression_from_dict,
@@ -166,6 +167,14 @@ def test_invalid_shapes_are_rejected() -> None:
         SourceRef("")
 
 
+@pytest.mark.parametrize("count", [True, 1.5, "2", None])
+def test_deserialisation_does_not_coerce_invalid_limits(count) -> None:
+    data = QueryPlan.scan("t").limit(2).to_dict()
+    data["root"]["count"] = count
+    with pytest.raises(ValueError, match="non-negative integer"):
+        QueryPlan.from_dict(data)
+
+
 def test_plan_reports_columns_and_parameters() -> None:
     plan = (
         QueryPlan.scan("orders")
@@ -182,6 +191,7 @@ def test_plan_reports_columns_and_parameters() -> None:
     assert plan.referenced_columns == ("a", "b", "n")
     assert plan.parameters == ("min", "pat")
     assert plan.output_names == ("a", "b1")
+    assert plan.predicate is not None
     assert referenced_columns(plan.predicate) == ("a", "n")
     assert referenced_parameters(plan.predicate) == ("min", "pat")
 
@@ -209,6 +219,51 @@ def test_literal_types_and_values_survive_serialisation() -> None:
     for value in values:
         lit = Literal.of(value)
         assert expression_from_dict(lit.to_dict()) == lit
+
+
+def test_numeric_literals_must_fit_the_portable_value_domain() -> None:
+    assert Literal.of(Decimal("1E+10")).data_type.to_dict() == {
+        "kind": "decimal",
+        "precision": 11,
+        "scale": 0,
+    }
+    assert Literal.of(Decimal("0.001")).data_type.to_dict() == {
+        "kind": "decimal",
+        "precision": 3,
+        "scale": 3,
+    }
+    for value in (
+        2**63,
+        -(2**63) - 1,
+        float("nan"),
+        float("inf"),
+        Decimal("NaN"),
+        Decimal("Infinity"),
+        Decimal("1E+76"),
+    ):
+        with pytest.raises(ValueError):
+            Literal.of(value)
+
+
+@pytest.mark.parametrize(
+    ("value", "data_type"),
+    [
+        ("oops", {"kind": "integer", "bits": 64}),
+        (1, {"kind": "string"}),
+        (128, {"kind": "integer", "bits": 8}),
+        ({"decimal": "123.45"}, {"kind": "decimal", "precision": 4, "scale": 2}),
+        ("2024-01-01", {"kind": "date"}),
+    ],
+)
+def test_deserialisation_rejects_falsely_typed_literals(value, data_type) -> None:
+    with pytest.raises(ValueError):
+        expression_from_dict({"node": "literal", "value": value, "type": data_type})
+
+
+def test_contextual_typed_null_remains_valid() -> None:
+    assert expression_from_dict(
+        {"node": "literal", "value": None, "type": {"kind": "string"}}
+    ) == Literal(None, StringType())
 
 
 def test_node_ids_are_stable() -> None:

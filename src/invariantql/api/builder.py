@@ -66,6 +66,11 @@ class Expr:
 
     __hash__ = None  # type: ignore[assignment]
 
+    def __bool__(self) -> bool:
+        raise TypeError(
+            "InvariantQL expressions have no Python truth value; combine predicates with & and |"
+        )
+
     # boolean composition
     def __and__(self, other: Any) -> Expr:
         return Expr(And((self.node, _unwrap(other))))

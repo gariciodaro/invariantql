@@ -60,6 +60,7 @@ REJECTED = [
     ("SELECT *, a FROM t", DiagnosticCode.SQL_UNSUPPORTED_CONSTRUCT),
     ("SELECT * FROM db.t", DiagnosticCode.SQL_QUALIFIED_SOURCE),
     ("SELECT * FROM read_csv('x')", DiagnosticCode.SQL_UNSUPPORTED_CONSTRUCT),
+    ("SELECT x.foo FROM t AS x(foo)", DiagnosticCode.SQL_UNSUPPORTED_CONSTRUCT),
     ("SELECT count(*) FROM t", DiagnosticCode.SQL_UNSUPPORTED_EXPRESSION),
     ("SELECT lower(a) FROM t", DiagnosticCode.SQL_UNSUPPORTED_EXPRESSION),
     ("SELECT CAST(a AS INT) FROM t", DiagnosticCode.SQL_UNSUPPORTED_EXPRESSION),
@@ -75,6 +76,9 @@ REJECTED = [
     ("SELECT * FROM t LIMIT 1.5", DiagnosticCode.SQL_INVALID_LIMIT),
     ("SELECT * FROM t LIMIT :n", DiagnosticCode.SQL_INVALID_LIMIT),
     ("SELECT * FROM t LIMIT 'x'", DiagnosticCode.SQL_INVALID_LIMIT),
+    ("SELECT 1e309 FROM t", DiagnosticCode.SQL_UNSUPPORTED_EXPRESSION),
+    ("SELECT 9223372036854775808 FROM t", DiagnosticCode.SQL_UNSUPPORTED_EXPRESSION),
+    ("SELECT -9223372036854775809 FROM t", DiagnosticCode.SQL_UNSUPPORTED_EXPRESSION),
     ("SELECT u.a FROM t", DiagnosticCode.SQL_AMBIGUOUS_IDENTIFIER),
     ("SELECT db.t.a FROM t", DiagnosticCode.SQL_AMBIGUOUS_IDENTIFIER),
     ("SELEC * FROM t", DiagnosticCode.SQL_PARSE_ERROR),
@@ -199,6 +203,10 @@ ACCEPTED = [
         QueryPlan.scan("t").where(IsNull(Column("a"))).limit(10),
     ),
     ("SELECT * FROM t LIMIT 0", QueryPlan.scan("t").limit(0)),
+    (
+        "SELECT -9223372036854775808 FROM t",
+        QueryPlan.scan("t").select(Alias(Literal.of(-(2**63)), "_col1")),
+    ),
     ("/* c */ SELECT a -- x\n FROM t", QueryPlan.scan("t").select("a")),
     (
         "SELECT * FROM t WHERE a = :x AND b = :x",

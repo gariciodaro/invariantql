@@ -96,11 +96,30 @@ class CapabilityPlanner:
                 rejected_parts: list[tuple[Expression, str]] = []
                 residual_reasons: list[str] = []
                 for conjunct in conjuncts(node.predicate):
-                    if (
+                    scan_supports = (
                         target.scan.predicate is not Support.NONE
                         and target.scan.supports_expression(conjunct)
-                    ):
+                    )
+                    if scan_supports and target.scan.predicate is Support.FULL:
                         pushed_parts.append(conjunct)
+                    elif scan_supports and target.scan.predicate is Support.PARTIAL:
+                        if target.engine.supports_expression(conjunct):
+                            # A partial source predicate is only a safe
+                            # relaxation.  The engine must recheck the complete
+                            # predicate to restore its exact semantics.
+                            pushed_parts.append(conjunct)
+                            residual_parts.append(conjunct)
+                            residual_reasons.append(
+                                f"{conjunct}: scan target predicate support is partial; "
+                                "engine rechecks"
+                            )
+                        else:
+                            kinds = ", ".join(
+                                k.value
+                                for k in _kinds(conjunct)
+                                if k not in target.engine.residual_expressions
+                            )
+                            rejected_parts.append((conjunct, kinds))
                     elif target.engine.supports_expression(conjunct):
                         residual_parts.append(conjunct)
                         if target.scan.predicate is Support.NONE:
@@ -184,8 +203,8 @@ class CapabilityPlanner:
                             Disposition.PARTIAL,
                             ExecutionLocation.SOURCE,
                             DiagnosticCode.PUSHDOWN_PARTIAL,
-                            f"{len(pushed_parts)} pushed, {len(residual_parts)} residual: "
-                            + "; ".join(residual_reasons),
+                            f"{len(pushed_parts)} pushed, {len(residual_parts)} "
+                            "evaluated or rechecked by the engine: " + "; ".join(residual_reasons),
                             pushed=_fmt(pushed_predicate),
                             residual=_fmt(residual_predicate),
                             evidence=target.scan.evidence,
@@ -200,21 +219,7 @@ class CapabilityPlanner:
                 )
                 names = node.output_names
                 pure_columns = all(isinstance(e, Column) for e in node.expressions)
-                if target.scan.projection is Support.NONE:
-                    residual_projection = node.expressions
-                    nodes.append(
-                        ExplainNode(
-                            node_id,
-                            "project",
-                            Disposition.RESIDUAL,
-                            ExecutionLocation.ENGINE,
-                            DiagnosticCode.RESIDUAL_NO_CAPABILITY,
-                            "scan target cannot prune columns; engine projects",
-                            residual=", ".join(str(e) for e in node.expressions),
-                            evidence=target.scan.evidence,
-                        )
-                    )
-                elif pure_columns and needed == names:
+                if target.scan.projection is Support.FULL and pure_columns and needed == names:
                     pushed_projection = names
                     nodes.append(
                         ExplainNode(
@@ -229,42 +234,139 @@ class CapabilityPlanner:
                         )
                     )
                 else:
-                    pushed_projection = needed
                     residual_projection = node.expressions
-                    reason = (
-                        "computed or aliased expressions evaluated by the engine"
-                        if not pure_columns
-                        else "extra columns read for the residual predicate; engine trims"
+                    pushed_projection = (
+                        needed if target.scan.projection is not Support.NONE and needed else None
                     )
-                    nodes.append(
-                        ExplainNode(
-                            node_id,
-                            "project",
-                            Disposition.PARTIAL,
-                            ExecutionLocation.SOURCE,
-                            DiagnosticCode.RESIDUAL_COMPUTED_PROJECTION,
-                            f"column pruning pushed; {reason}",
-                            pushed=", ".join(needed),
-                            residual=", ".join(str(e) for e in node.expressions),
-                            evidence=target.scan.evidence,
+                    unsupported = [
+                        expression
+                        for expression in node.expressions
+                        if not target.engine.supports_expression(expression)
+                    ]
+                    if not target.engine.residual_projection:
+                        detail = f"engine {target.engine_name!r} cannot evaluate projections"
+                        code = DiagnosticCode.REJECTED_ENGINE_UNSUPPORTED_OPERATION
+                    elif unsupported:
+                        kinds = sorted(
+                            {
+                                kind.value
+                                for expression in unsupported
+                                for kind in _kinds(expression)
+                                if kind not in target.engine.residual_expressions
+                            }
                         )
-                    )
+                        detail = (
+                            f"engine {target.engine_name!r} cannot evaluate projection "
+                            f"expression kind(s): {', '.join(kinds)}"
+                        )
+                        code = DiagnosticCode.REJECTED_ENGINE_UNSUPPORTED_EXPRESSION
+                    else:
+                        detail = ""
+                        code = DiagnosticCode.RESIDUAL_COMPUTED_PROJECTION
+
+                    if detail:
+                        nodes.append(
+                            ExplainNode(
+                                node_id,
+                                "project",
+                                Disposition.REJECTED,
+                                ExecutionLocation.NONE,
+                                code,
+                                detail,
+                                pushed=(
+                                    None
+                                    if pushed_projection is None
+                                    else ", ".join(pushed_projection)
+                                ),
+                                residual=", ".join(str(e) for e in node.expressions),
+                                evidence=target.engine.evidence,
+                            )
+                        )
+                        diagnostics.append(
+                            Diagnostic.error(
+                                code,
+                                detail,
+                                node_id=node_id,
+                                target=target.engine_name,
+                            )
+                        )
+                    elif target.scan.projection is Support.NONE:
+                        nodes.append(
+                            ExplainNode(
+                                node_id,
+                                "project",
+                                Disposition.RESIDUAL,
+                                ExecutionLocation.ENGINE,
+                                DiagnosticCode.RESIDUAL_NO_CAPABILITY,
+                                "scan target cannot prune columns; engine projects",
+                                residual=", ".join(str(e) for e in node.expressions),
+                                evidence=target.scan.evidence,
+                            )
+                        )
+                    elif pushed_projection is None:
+                        # Arrow has no portable representation for a non-zero
+                        # row count with zero columns.  Reading all source
+                        # columns preserves cardinality for ``SELECT 1 FROM t``.
+                        nodes.append(
+                            ExplainNode(
+                                node_id,
+                                "project",
+                                Disposition.RESIDUAL,
+                                ExecutionLocation.ENGINE,
+                                DiagnosticCode.RESIDUAL_COMPUTED_PROJECTION,
+                                "constant projection evaluated by the engine; source columns "
+                                "retained to preserve row cardinality",
+                                residual=", ".join(str(e) for e in node.expressions),
+                                evidence=target.scan.evidence,
+                            )
+                        )
+                    else:
+                        if target.scan.projection is Support.PARTIAL:
+                            reason = (
+                                "scan target column pruning is partial; engine enforces the "
+                                "projection"
+                            )
+                            code = DiagnosticCode.PUSHDOWN_PARTIAL
+                        else:
+                            reason = (
+                                "computed or aliased expressions evaluated by the engine"
+                                if not pure_columns
+                                else "extra columns read for the residual predicate; engine trims"
+                            )
+                            reason = f"column pruning pushed; {reason}"
+                            code = DiagnosticCode.RESIDUAL_COMPUTED_PROJECTION
+                        nodes.append(
+                            ExplainNode(
+                                node_id,
+                                "project",
+                                Disposition.PARTIAL,
+                                ExecutionLocation.SOURCE,
+                                code,
+                                reason,
+                                pushed=", ".join(pushed_projection),
+                                residual=", ".join(str(e) for e in node.expressions),
+                                evidence=target.scan.evidence,
+                            )
+                        )
                 continue
 
             if isinstance(node, Limit):
                 if residual_predicate is not None:
-                    residual_limit = node.count
-                    nodes.append(
-                        ExplainNode(
-                            node_id,
-                            "limit",
-                            Disposition.RESIDUAL,
-                            ExecutionLocation.ENGINE,
-                            DiagnosticCode.RESIDUAL_LIMIT_AFTER_RESIDUAL_FILTER,
-                            "a residual predicate must run before the limit",
-                            residual=str(node.count),
+                    if target.engine.residual_limit:
+                        residual_limit = node.count
+                        nodes.append(
+                            ExplainNode(
+                                node_id,
+                                "limit",
+                                Disposition.RESIDUAL,
+                                ExecutionLocation.ENGINE,
+                                DiagnosticCode.RESIDUAL_LIMIT_AFTER_RESIDUAL_FILTER,
+                                "a residual predicate must run before the limit",
+                                residual=str(node.count),
+                            )
                         )
-                    )
+                    else:
+                        _reject_residual_limit(nodes, diagnostics, node_id, node.count, target)
                 elif target.scan.limit is Support.FULL:
                     pushed_limit = node.count
                     nodes.append(
@@ -280,35 +382,41 @@ class CapabilityPlanner:
                         )
                     )
                 elif target.scan.limit is Support.PARTIAL:
-                    pushed_limit = node.count
-                    residual_limit = node.count
-                    nodes.append(
-                        ExplainNode(
-                            node_id,
-                            "limit",
-                            Disposition.PARTIAL,
-                            ExecutionLocation.SOURCE,
-                            DiagnosticCode.PUSHDOWN_PARTIAL,
-                            "scan target treats the limit as a hint; engine re-applies it",
-                            pushed=str(node.count),
-                            residual=str(node.count),
-                            evidence=target.scan.evidence,
+                    if target.engine.residual_limit:
+                        pushed_limit = node.count
+                        residual_limit = node.count
+                        nodes.append(
+                            ExplainNode(
+                                node_id,
+                                "limit",
+                                Disposition.PARTIAL,
+                                ExecutionLocation.SOURCE,
+                                DiagnosticCode.PUSHDOWN_PARTIAL,
+                                "scan target treats the limit as a hint; engine re-applies it",
+                                pushed=str(node.count),
+                                residual=str(node.count),
+                                evidence=target.scan.evidence,
+                            )
                         )
-                    )
+                    else:
+                        _reject_residual_limit(nodes, diagnostics, node_id, node.count, target)
                 else:
-                    residual_limit = node.count
-                    nodes.append(
-                        ExplainNode(
-                            node_id,
-                            "limit",
-                            Disposition.RESIDUAL,
-                            ExecutionLocation.ENGINE,
-                            DiagnosticCode.RESIDUAL_NO_CAPABILITY,
-                            "scan target cannot limit; engine applies it",
-                            residual=str(node.count),
-                            evidence=target.scan.evidence,
+                    if target.engine.residual_limit:
+                        residual_limit = node.count
+                        nodes.append(
+                            ExplainNode(
+                                node_id,
+                                "limit",
+                                Disposition.RESIDUAL,
+                                ExecutionLocation.ENGINE,
+                                DiagnosticCode.RESIDUAL_NO_CAPABILITY,
+                                "scan target cannot limit; engine applies it",
+                                residual=str(node.count),
+                                evidence=target.scan.evidence,
+                            )
                         )
-                    )
+                    else:
+                        _reject_residual_limit(nodes, diagnostics, node_id, node.count, target)
                 continue
 
         executable = not any(n.disposition is Disposition.REJECTED for n in nodes)
@@ -349,6 +457,30 @@ def _kinds(expression: Expression):
     from invariantql.domain.expressions import walk
 
     return {node.kind for node in walk(expression)}
+
+
+def _reject_residual_limit(
+    nodes: list[ExplainNode],
+    diagnostics: list[Diagnostic],
+    node_id: str,
+    count: int,
+    target: PlanningTarget,
+) -> None:
+    detail = f"engine {target.engine_name!r} cannot enforce a residual limit"
+    code = DiagnosticCode.REJECTED_ENGINE_UNSUPPORTED_OPERATION
+    nodes.append(
+        ExplainNode(
+            node_id,
+            "limit",
+            Disposition.REJECTED,
+            ExecutionLocation.NONE,
+            code,
+            detail,
+            residual=str(count),
+            evidence=target.engine.evidence,
+        )
+    )
+    diagnostics.append(Diagnostic.error(code, detail, node_id=node_id, target=target.engine_name))
 
 
 __all__ = ["CapabilityPlanner", "PlanningTarget"]

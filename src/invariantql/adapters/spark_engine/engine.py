@@ -51,6 +51,7 @@ from invariantql.domain.expressions import (
 )
 from invariantql.domain.redaction import redact_exception
 from invariantql.domain.schema import Field, Schema
+from invariantql.domain.semantics import expression_type
 from invariantql.domain.types import (
     BinaryType,
     BooleanType,
@@ -76,8 +77,17 @@ from invariantql.ports.storage import Storage
 NATIVE_KINDS: dict[str, tuple[str, str]] = {
     "jdbc:postgresql": ("jdbc", "org.postgresql:postgresql JDBC driver"),
     "jdbc:mysql": ("jdbc", "com.mysql:mysql-connector-j JDBC driver"),
-    "mongodb": ("mongodb", "org.mongodb.spark:mongo-spark-connector"),
-    "neo4j": ("org.neo4j.spark.DataSource", "org.neo4j:neo4j-connector-apache-spark"),
+    "mongodb": ("mongodb", "org.mongodb.spark:mongo-spark-connector_2.12"),
+    "neo4j": (
+        "org.neo4j.spark.DataSource",
+        "org.neo4j:neo4j-connector-apache-spark_2.12 (_for_spark_3 release)",
+    ),
+}
+
+_AZURE_AUTHORITIES = {
+    "core.windows.net": "login.microsoftonline.com",
+    "core.chinacloudapi.cn": "login.chinacloudapi.cn",
+    "core.usgovcloudapi.net": "login.microsoftonline.us",
 }
 
 
@@ -191,17 +201,31 @@ class SparkEngine:
         pushed, residual = execution_plan.pushed, execution_plan.residual
         predicate = and_all(p for p in (pushed.predicate, residual.predicate) if p is not None)
         if predicate is not None:
-            df = df.filter(to_spark_column(substitute_parameters(predicate, values)))
-        if residual.projection is not None:
-            df = df.select(
-                *[to_spark_column(substitute_parameters(e, values)) for e in residual.projection]
+            df = df.filter(
+                to_spark_column(
+                    substitute_parameters(predicate, values),
+                    execution_plan.schema,
+                )
             )
+        if residual.projection is not None:
+            projected: list[SparkColumn] = []
+            for expression, field in zip(
+                residual.projection, execution_plan.output_schema, strict=True
+            ):
+                column = to_spark_column(
+                    substitute_parameters(expression, values),
+                    execution_plan.schema,
+                )
+                if not isinstance(field.data_type, (UnknownType, NullType)):
+                    column = column.cast(to_spark_type(field.data_type))
+                projected.append(column.alias(field.name))
+            df = df.select(*projected)
         elif pushed.projection is not None:
             df = df.select(*[F.col(_quote(c)) for c in pushed.projection])
         limits = [n for n in (pushed.limit, residual.limit) if n is not None]
         if limits:
             df = df.limit(min(limits))
-        return df
+        return _normalise_spark_output(df, execution_plan.output_schema)
 
     def close(self) -> None:
         return None
@@ -223,17 +247,27 @@ class SparkEngine:
         applied: dict[str, str] = {}
         account = options.get("account_name")
         if account:
-            host = f"{account}.dfs.core.windows.net"
+            endpoint_kind = options.get("endpoint_kind", "dfs")
+            endpoint_suffix = options.get("endpoint_suffix", "core.windows.net")
+            host = f"{account}.{endpoint_kind}.{endpoint_suffix}"
             if options.get("account_key"):
                 applied[f"fs.azure.account.key.{host}"] = options["account_key"]
+                if endpoint_kind == "dfs":
+                    applied[f"fs.azure.account.auth.type.{host}"] = "SharedKey"
             elif options.get("sas_token"):
-                applied[f"fs.azure.account.auth.type.{host}"] = "SAS"
-                applied[f"fs.azure.sas.token.provider.type.{host}"] = (
-                    "org.apache.hadoop.fs.azurebfs.sas.FixedSASTokenProvider"
-                )
-                applied[f"fs.azure.sas.fixed.token.{host}"] = options["sas_token"]
+                if endpoint_kind == "blob":
+                    container = options.get("container")
+                    if container:
+                        applied[f"fs.azure.sas.{container}.{host}"] = options["sas_token"]
+                else:
+                    applied[f"fs.azure.account.auth.type.{host}"] = "SAS"
+                    applied[f"fs.azure.sas.token.provider.type.{host}"] = (
+                        "org.apache.hadoop.fs.azurebfs.sas.FixedSASTokenProvider"
+                    )
+                    applied[f"fs.azure.sas.fixed.token.{host}"] = options["sas_token"]
             elif (
-                options.get("client_id")
+                endpoint_kind == "dfs"
+                and options.get("client_id")
                 and options.get("client_secret")
                 and options.get("tenant_id")
             ):
@@ -244,7 +278,8 @@ class SparkEngine:
                 applied[f"fs.azure.account.oauth2.client.id.{host}"] = options["client_id"]
                 applied[f"fs.azure.account.oauth2.client.secret.{host}"] = options["client_secret"]
                 applied[f"fs.azure.account.oauth2.client.endpoint.{host}"] = (
-                    f"https://login.microsoftonline.com/{options['tenant_id']}/oauth2/token"
+                    f"https://{_AZURE_AUTHORITIES.get(endpoint_suffix, 'login.microsoftonline.com')}"
+                    f"/{options['tenant_id']}/oauth2/token"
                 )
         if options.get("aws_access_key_id"):
             applied["fs.s3a.access.key"] = options["aws_access_key_id"]
@@ -252,8 +287,21 @@ class SparkEngine:
             applied["fs.s3a.secret.key"] = options["aws_secret_access_key"]
         if options.get("aws_session_token"):
             applied["fs.s3a.session.token"] = options["aws_session_token"]
+            applied["fs.s3a.aws.credentials.provider"] = (
+                "org.apache.hadoop.fs.s3a.TemporaryAWSCredentialsProvider"
+            )
+        elif options.get("aws_access_key_id") and options.get("aws_secret_access_key"):
+            applied["fs.s3a.aws.credentials.provider"] = (
+                "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
+            )
+        elif options.get("aws_anonymous") == "true":
+            applied["fs.s3a.aws.credentials.provider"] = (
+                "org.apache.hadoop.fs.s3a.AnonymousAWSCredentialsProvider"
+            )
         if options.get("aws_endpoint_url"):
             applied["fs.s3a.endpoint"] = options["aws_endpoint_url"]
+        if options.get("aws_allow_http") == "true":
+            applied["fs.s3a.connection.ssl.enabled"] = "false"
         if options.get("aws_region"):
             applied["fs.s3a.endpoint.region"] = options["aws_region"]
         for key, value in applied.items():
@@ -314,7 +362,7 @@ def _quote(name: str) -> str:
     return "`" + name.replace("`", "``") + "`"
 
 
-def to_spark_column(expression: Expression) -> SparkColumn:
+def to_spark_column(expression: Expression, schema: Schema | None = None) -> SparkColumn:
     if isinstance(expression, Column):
         return F.col(_quote(expression.name))
     if isinstance(expression, Literal):
@@ -324,9 +372,10 @@ def to_spark_column(expression: Expression) -> SparkColumn:
             f"unbound parameter {expression.name!r}", code=DiagnosticCode.PARAMETER_MISSING
         )
     if isinstance(expression, Alias):
-        return to_spark_column(expression.expression).alias(expression.name)
+        return to_spark_column(expression.expression, schema).alias(expression.name)
     if isinstance(expression, Comparison):
-        left, right = to_spark_column(expression.left), to_spark_column(expression.right)
+        left = to_spark_column(expression.left, schema)
+        right = to_spark_column(expression.right, schema)
         return {
             ComparisonOp.EQ: lambda: left == right,
             ComparisonOp.NE: lambda: left != right,
@@ -336,27 +385,27 @@ def to_spark_column(expression: Expression) -> SparkColumn:
             ComparisonOp.GE: lambda: left >= right,
         }[expression.op]()
     if isinstance(expression, And):
-        out = to_spark_column(expression.operands[0])
+        out = to_spark_column(expression.operands[0], schema)
         for operand in expression.operands[1:]:
-            out = out & to_spark_column(operand)
+            out = out & to_spark_column(operand, schema)
         return out
     if isinstance(expression, Or):
-        out = to_spark_column(expression.operands[0])
+        out = to_spark_column(expression.operands[0], schema)
         for operand in expression.operands[1:]:
-            out = out | to_spark_column(operand)
+            out = out | to_spark_column(operand, schema)
         return out
     if isinstance(expression, Not):
-        return ~to_spark_column(expression.operand)
+        return ~to_spark_column(expression.operand, schema)
     if isinstance(expression, IsNull):
-        operand = to_spark_column(expression.operand)
+        operand = to_spark_column(expression.operand, schema)
         return operand.isNotNull() if expression.negated else operand.isNull()
     if isinstance(expression, In):
-        operand = to_spark_column(expression.operand)
-        values = [to_spark_column(v) for v in expression.values]
+        operand = to_spark_column(expression.operand, schema)
+        values = [to_spark_column(v, schema) for v in expression.values]
         result = operand.isin(*values)
         return ~result if expression.negated else result
     if isinstance(expression, Like):
-        operand = to_spark_column(expression.operand)
+        operand = to_spark_column(expression.operand, schema)
         if not isinstance(expression.pattern, Literal) or not isinstance(
             expression.pattern.value, str
         ):
@@ -364,24 +413,82 @@ def to_spark_column(expression: Expression) -> SparkColumn:
         result = operand.like(expression.pattern.value)
         return ~result if expression.negated else result
     if isinstance(expression, Arithmetic):
-        left, right = to_spark_column(expression.left), to_spark_column(expression.right)
+        left = to_spark_column(expression.left, schema)
+        right = to_spark_column(expression.right, schema)
+        result_type = expression_type(expression, schema) if schema is not None else None
+        if isinstance(result_type, IntegerType):
+            left = left.cast(T.LongType())
+            right = right.cast(T.LongType())
+            if expression.op is ArithmeticOp.ADD:
+                return F.try_add(left, right)
+            if expression.op is ArithmeticOp.SUB:
+                return F.try_subtract(left, right)
+            if expression.op is ArithmeticOp.MUL:
+                return F.try_multiply(left, right)
+        if isinstance(result_type, DecimalType):
+            left_type = expression_type(expression.left, schema) if schema is not None else None
+            right_type = expression_type(expression.right, schema) if schema is not None else None
+            left = left.cast(_spark_decimal_operand_type(left_type, result_type))
+            right = right.cast(_spark_decimal_operand_type(right_type, result_type))
+        if isinstance(result_type, FloatType) and result_type.bits == 64:
+            left = left.cast(T.DoubleType())
+            right = right.cast(T.DoubleType())
         if expression.op is ArithmeticOp.ADD:
-            return left + right
-        if expression.op is ArithmeticOp.SUB:
-            return left - right
-        if expression.op is ArithmeticOp.MUL:
-            return left * right
-        return left / right
+            result = left + right
+        elif expression.op is ArithmeticOp.SUB:
+            result = left - right
+        elif expression.op is ArithmeticOp.MUL:
+            result = left * right
+        else:
+            denominator = F.when(right == F.lit(0), F.lit(None)).otherwise(right)
+            result = left.cast(T.DoubleType()) / denominator
+        if isinstance(result_type, DecimalType):
+            result = result.cast(to_spark_type(result_type))
+        return result
     raise ExecutionError(f"unsupported expression for Spark: {type(expression).__name__}")
 
 
 def _literal(literal: Literal) -> SparkColumn:
     value = literal.value
     if value is None:
-        return F.lit(None)
+        column = F.lit(None)
+        if not isinstance(literal.data_type, (UnknownType, NullType)):
+            column = column.cast(to_spark_type(literal.data_type))
+        return column
     if isinstance(value, bool | int | float | str | Decimal | _dt.date | _dt.datetime | bytes):
-        return F.lit(value)
+        return F.lit(value).cast(to_spark_type(literal.data_type))
     raise ExecutionError(f"unsupported literal type for Spark: {type(value).__name__}")
+
+
+def _spark_decimal_operand_type(
+    data_type: DataType | None,
+    result_type: DecimalType,
+) -> T.DecimalType:
+    if isinstance(data_type, DecimalType):
+        return T.DecimalType(data_type.precision, data_type.scale)
+    if isinstance(data_type, IntegerType):
+        precision = {8: 3, 16: 5, 32: 10, 64: 19}[data_type.bits]
+        return T.DecimalType(precision, 0)
+    return T.DecimalType(result_type.precision, result_type.scale)
+
+
+def _normalise_spark_output(frame: DataFrame, schema: Schema) -> DataFrame:
+    """Apply the logical types and conservative nullability without an action."""
+
+    projected: list[SparkColumn] = []
+    for field in schema:
+        column = F.col(_quote(field.name))
+        if not isinstance(field.data_type, (UnknownType, NullType)):
+            spark_type = to_spark_type(field.data_type)
+            column = column.cast(spark_type)
+            null_value = F.lit(None).cast(spark_type)
+        else:
+            null_value = F.lit(None)
+        # CASE preserves values while making nullable result metadata
+        # deterministic across file readers and native connectors.
+        column = F.when(column.isNull(), null_value).otherwise(column)
+        projected.append(column.alias(field.name))
+    return frame.select(*projected)
 
 
 # -- schema translation -------------------------------------------------------

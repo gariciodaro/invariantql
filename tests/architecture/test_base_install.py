@@ -28,6 +28,7 @@ PROVIDERS = [
     "neo4j",
     "deltalake",
     "pyiceberg",
+    "defusedxml",
     "sqlglot",
     "numpy",
 ]

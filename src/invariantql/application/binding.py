@@ -7,6 +7,7 @@ comparable types, and derives the output schema. It performs no I/O.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from invariantql.domain.diagnostics import DiagnosticCode, PlanValidationError
@@ -14,7 +15,6 @@ from invariantql.domain.expressions import (
     Alias,
     And,
     Arithmetic,
-    ArithmeticOp,
     Column,
     Comparison,
     Expression,
@@ -26,18 +26,18 @@ from invariantql.domain.expressions import (
     Or,
     Parameter,
     output_name,
+    substitute_parameters,
 )
 from invariantql.domain.plan import QueryPlan
 from invariantql.domain.schema import Field, Schema
+from invariantql.domain.semantics import expression_type
 from invariantql.domain.types import (
-    BooleanType,
+    PORTABLE_DECIMAL_PRECISION,
     DataType,
-    FloatType,
-    NullType,
-    UnknownType,
     is_comparable,
     is_numeric,
-    unify,
+    is_portable_type,
+    normalise_portable_type,
 )
 
 
@@ -48,37 +48,65 @@ class BoundPlan:
     output_schema: Schema
 
 
-def bind_plan(plan: QueryPlan, schema: Schema) -> BoundPlan:
-    binder = _Binder(schema)
+def bind_plan(
+    plan: QueryPlan,
+    schema: Schema,
+    parameters: Mapping[str, Literal] | None = None,
+) -> BoundPlan:
+    binder = _Binder(schema, parameters)
     predicate = plan.predicate
     projection = plan.projection
+    node_ids = {node.operation: node_id for node_id, node in plan.node_ids()}
 
     bound_predicate = None
     if predicate is not None:
-        bound_predicate = binder.bind(predicate, node_id="1-filter")
+        predicate_node_id = node_ids["filter"]
+        bound_predicate = binder.bind(predicate, node_id=predicate_node_id)
         ptype = binder.type_of(bound_predicate)
         if ptype.kind not in ("boolean", "unknown", "null"):
             raise PlanValidationError(
                 f"WHERE predicate must be boolean, got {ptype}",
                 code=DiagnosticCode.PLAN_TYPE_MISMATCH,
-                node_id="1-filter",
+                node_id=predicate_node_id,
             )
 
     bound_projection: tuple[Expression, ...] | None = None
     output_fields: list[Field]
     if projection is not None:
+        projection_node_id = node_ids["project"]
         exprs = []
         output_fields = []
+        output_names: set[str] = set()
         for expression in projection:
-            bound = binder.bind(expression, node_id="2-project")
+            bound = binder.bind(expression, node_id=projection_node_id, allow_alias=True)
+            name = output_name(bound)
+            if name in output_names:
+                raise PlanValidationError(
+                    f"duplicate output column after name resolution: {name!r}",
+                    code=DiagnosticCode.PLAN_INVALID_SHAPE,
+                    node_id=projection_node_id,
+                    details={"column": name},
+                )
+            output_names.add(name)
             exprs.append(bound)
             inner = bound.expression if isinstance(bound, Alias) else bound
             output_fields.append(
-                Field(output_name(bound), binder.type_of(inner), binder.nullable_of(inner))
+                Field(name, normalise_portable_type(binder.type_of(inner)), nullable=True)
             )
         bound_projection = tuple(exprs)
     else:
-        output_fields = list(schema.fields)
+        output_fields = [
+            Field(field.name, normalise_portable_type(field.data_type), nullable=True)
+            for field in schema
+        ]
+
+    output_node_id = node_ids["project"] if projection is not None else node_ids["scan"]
+    for field in output_fields:
+        binder.require_portable_type(
+            field.data_type,
+            node_id=output_node_id,
+            context=f"output column {field.name!r}",
+        )
 
     rebuilt = QueryPlan.scan(plan.source)
     if bound_predicate is not None:
@@ -91,10 +119,17 @@ def bind_plan(plan: QueryPlan, schema: Schema) -> BoundPlan:
 
 
 class _Binder:
-    def __init__(self, schema: Schema) -> None:
+    def __init__(
+        self,
+        schema: Schema,
+        parameters: Mapping[str, Literal] | None = None,
+    ) -> None:
         self.schema = schema
+        self.parameters = dict(parameters or {})
 
-    def bind(self, expression: Expression, *, node_id: str) -> Expression:
+    def bind(
+        self, expression: Expression, *, node_id: str, allow_alias: bool = False
+    ) -> Expression:
         if isinstance(expression, Column):
             field = self.schema.resolve(expression.name)
             if field is None:
@@ -104,10 +139,35 @@ class _Binder:
                     node_id=node_id,
                     details={"column": expression.name},
                 )
+            self.require_portable_type(
+                field.data_type,
+                node_id=node_id,
+                context=f"column {field.name!r}",
+            )
             return Column(field.name)
-        if isinstance(expression, (Literal, Parameter)):
+        if isinstance(expression, Literal):
+            self.require_portable_type(
+                expression.data_type,
+                node_id=node_id,
+                context="literal",
+            )
+            return expression
+        if isinstance(expression, Parameter):
+            literal = self.parameters.get(expression.name)
+            if literal is not None:
+                self.require_portable_type(
+                    literal.data_type,
+                    node_id=node_id,
+                    context=f"parameter {expression.name!r}",
+                )
             return expression
         if isinstance(expression, Alias):
+            if not allow_alias:
+                raise PlanValidationError(
+                    "aliases are only valid at the top level of a projection",
+                    code=DiagnosticCode.PLAN_INVALID_SHAPE,
+                    node_id=node_id,
+                )
             return Alias(self.bind(expression.expression, node_id=node_id), expression.name)
         if isinstance(expression, Comparison):
             left = self.bind(expression.left, node_id=node_id)
@@ -115,11 +175,19 @@ class _Binder:
             self._check_comparable(left, right, node_id, str(expression))
             return Comparison(expression.op, left, right)
         if isinstance(expression, And):
-            return And(tuple(self.bind(o, node_id=node_id) for o in expression.operands))
+            operands = tuple(self.bind(o, node_id=node_id) for o in expression.operands)
+            for operand in operands:
+                self._check_boolean(operand, node_id, str(expression))
+            return And(operands)
         if isinstance(expression, Or):
-            return Or(tuple(self.bind(o, node_id=node_id) for o in expression.operands))
+            operands = tuple(self.bind(o, node_id=node_id) for o in expression.operands)
+            for operand in operands:
+                self._check_boolean(operand, node_id, str(expression))
+            return Or(operands)
         if isinstance(expression, Not):
-            return Not(self.bind(expression.operand, node_id=node_id))
+            operand = self.bind(expression.operand, node_id=node_id)
+            self._check_boolean(operand, node_id, str(expression))
+            return Not(operand)
         if isinstance(expression, IsNull):
             return IsNull(self.bind(expression.operand, node_id=node_id), expression.negated)
         if isinstance(expression, In):
@@ -137,7 +205,15 @@ class _Binder:
                     code=DiagnosticCode.PLAN_TYPE_MISMATCH,
                     node_id=node_id,
                 )
-            return Like(operand, self.bind(expression.pattern, node_id=node_id), expression.negated)
+            pattern = self.bind(expression.pattern, node_id=node_id)
+            ptype = self.type_of(pattern)
+            if ptype.kind not in ("string", "unknown", "null"):
+                raise PlanValidationError(
+                    f"LIKE requires a string pattern, got {ptype} in {expression}",
+                    code=DiagnosticCode.PLAN_TYPE_MISMATCH,
+                    node_id=node_id,
+                )
+            return Like(operand, pattern, expression.negated)
         if isinstance(expression, Arithmetic):
             left = self.bind(expression.left, node_id=node_id)
             right = self.bind(expression.right, node_id=node_id)
@@ -149,7 +225,16 @@ class _Binder:
                         code=DiagnosticCode.PLAN_TYPE_MISMATCH,
                         node_id=node_id,
                     )
-            return Arithmetic(expression.op, left, right)
+            bound = Arithmetic(expression.op, left, right)
+            try:
+                self.type_of(bound)
+            except ValueError as exc:
+                raise PlanValidationError(
+                    f"arithmetic result is outside the portable type range in {expression}: {exc}",
+                    code=DiagnosticCode.PLAN_TYPE_MISMATCH,
+                    node_id=node_id,
+                ) from None
+            return bound
         raise PlanValidationError(
             f"unsupported expression node {type(expression).__name__}",
             code=DiagnosticCode.PLAN_INVALID_SHAPE,
@@ -167,28 +252,19 @@ class _Binder:
                 node_id=node_id,
             )
 
+    def _check_boolean(self, expression: Expression, node_id: str, text: str) -> None:
+        data_type = self.type_of(expression)
+        if data_type.kind not in ("boolean", "unknown", "null"):
+            raise PlanValidationError(
+                f"boolean operator requires boolean operands, got {data_type} in {text}",
+                code=DiagnosticCode.PLAN_TYPE_MISMATCH,
+                node_id=node_id,
+            )
+
     def type_of(self, expression: Expression) -> DataType:
-        if isinstance(expression, Column):
-            field = self.schema.resolve(expression.name)
-            return field.data_type if field is not None else UnknownType()
-        if isinstance(expression, Literal):
-            return expression.data_type
-        if isinstance(expression, Parameter):
-            return UnknownType()
-        if isinstance(expression, Alias):
-            return self.type_of(expression.expression)
-        if isinstance(expression, (Comparison, And, Or, Not, IsNull, In, Like)):
-            return BooleanType()
-        if isinstance(expression, Arithmetic):
-            if expression.op is ArithmeticOp.DIV:
-                return FloatType(64)
-            left, right = self.type_of(expression.left), self.type_of(expression.right)
-            if isinstance(left, (UnknownType, NullType)) and isinstance(
-                right, (UnknownType, NullType)
-            ):
-                return UnknownType()
-            return unify(left, right)
-        return UnknownType()
+        if self.parameters:
+            expression = substitute_parameters(expression, self.parameters)
+        return expression_type(expression, self.schema)
 
     def nullable_of(self, expression: Expression) -> bool:
         if isinstance(expression, Column):
@@ -199,6 +275,18 @@ class _Binder:
         if isinstance(expression, Arithmetic):
             return self.nullable_of(expression.left) or self.nullable_of(expression.right)
         return True
+
+    @staticmethod
+    def require_portable_type(data_type: DataType, *, node_id: str, context: str) -> None:
+        if is_portable_type(data_type):
+            return
+        raise PlanValidationError(
+            f"{context} has type {data_type}, which exceeds the Local+Spark "
+            f"decimal precision limit of {PORTABLE_DECIMAL_PRECISION}",
+            code=DiagnosticCode.PLAN_TYPE_MISMATCH,
+            node_id=node_id,
+            details={"type": str(data_type)},
+        )
 
 
 __all__ = ["BoundPlan", "bind_plan"]

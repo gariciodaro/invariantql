@@ -814,6 +814,15 @@ wheels = [
 ]
 
 [[package]]
+name = "defusedxml"
+version = "0.7.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/0f/d5/c66da9b79e5bdb124974bfe172b4daf3c984ebd9c2a06e2b8a4dc7331c72/defusedxml-0.7.1.tar.gz", hash = "sha256:1bb3032db185915b62d7c6209c5a8792be6a32ab2fedacc84e01b52c51aa3e69", size = 75520, upload-time = "2021-03-08T10:59:26.269Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/6c/aa3f2f849e01cb6a001cd8554a88d4c77c5c1a31c95bdf1cf9301e6d9ef4/defusedxml-0.7.1-py2.py3-none-any.whl", hash = "sha256:a352e7e428770286cc899e2542b6cdaedb2b4953ff269a210103ec58f6198a61", size = 25604, upload-time = "2021-03-08T10:59:24.45Z" },
+]
+
+[[package]]
 name = "deltalake"
 version = "1.6.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1293,6 +1302,7 @@ all = [
     { name = "adlfs" },
     { name = "azure-identity" },
     { name = "azure-storage-blob" },
+    { name = "defusedxml" },
     { name = "deltalake" },
     { name = "duckdb" },
     { name = "fsspec" },
@@ -1305,7 +1315,7 @@ all = [
     { name = "pyarrow" },
     { name = "pyiceberg" },
     { name = "pymongo" },
-    { name = "pymysql" },
+    { name = "pymysql", extra = ["rsa"] },
     { name = "pyspark" },
     { name = "s3fs" },
 ]
@@ -1334,7 +1344,7 @@ mongodb = [
 ]
 mysql = [
     { name = "pyarrow" },
-    { name = "pymysql" },
+    { name = "pymysql", extra = ["rsa"] },
 ]
 neo4j = [
     { name = "neo4j" },
@@ -1364,6 +1374,10 @@ sftp = [
 spark = [
     { name = "pyspark" },
 ]
+xml = [
+    { name = "defusedxml" },
+    { name = "pyarrow" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -1380,13 +1394,14 @@ requires-dist = [
     { name = "adlfs", marker = "extra == 'azure'", specifier = ">=2024.4" },
     { name = "azure-identity", marker = "extra == 'azure'", specifier = ">=1.15" },
     { name = "azure-storage-blob", marker = "extra == 'azure'", specifier = ">=12.19" },
+    { name = "defusedxml", marker = "extra == 'xml'", specifier = ">=0.7" },
     { name = "deltalake", marker = "extra == 'delta'", specifier = ">=0.18" },
-    { name = "duckdb", marker = "extra == 'duckdb'", specifier = ">=1.1" },
+    { name = "duckdb", marker = "extra == 'duckdb'", specifier = ">=1.2" },
     { name = "fsspec", marker = "extra == 'azure'", specifier = ">=2024.3" },
     { name = "fsspec", marker = "extra == 'duckdb'", specifier = ">=2024.3" },
     { name = "fsspec", marker = "extra == 's3'", specifier = ">=2024.3" },
     { name = "fsspec", marker = "extra == 'sftp'", specifier = ">=2024.3" },
-    { name = "invariantql", extras = ["duckdb", "pandas", "polars", "spark", "azure", "s3", "sftp", "postgres", "mysql", "mongodb", "neo4j", "delta", "iceberg"], marker = "extra == 'all'" },
+    { name = "invariantql", extras = ["duckdb", "pandas", "polars", "spark", "azure", "s3", "sftp", "postgres", "mysql", "mongodb", "neo4j", "xml", "delta", "iceberg"], marker = "extra == 'all'" },
     { name = "neo4j", marker = "extra == 'neo4j'", specifier = ">=5.15" },
     { name = "pandas", marker = "extra == 'pandas'", specifier = ">=2.0" },
     { name = "paramiko", marker = "extra == 'sftp'", specifier = ">=3.4" },
@@ -1401,14 +1416,15 @@ requires-dist = [
     { name = "pyarrow", marker = "extra == 'pandas'", specifier = ">=15.0" },
     { name = "pyarrow", marker = "extra == 'polars'", specifier = ">=15.0" },
     { name = "pyarrow", marker = "extra == 'postgres'", specifier = ">=15.0" },
+    { name = "pyarrow", marker = "extra == 'xml'", specifier = ">=15.0" },
     { name = "pyiceberg", marker = "extra == 'iceberg'", specifier = ">=0.7" },
     { name = "pymongo", marker = "extra == 'mongodb'", specifier = ">=4.6" },
-    { name = "pymysql", marker = "extra == 'mysql'", specifier = ">=1.1" },
+    { name = "pymysql", extras = ["rsa"], marker = "extra == 'mysql'", specifier = ">=1.1" },
     { name = "pyspark", marker = "extra == 'spark'", specifier = ">=3.5,<4.0" },
     { name = "s3fs", marker = "extra == 's3'", specifier = ">=2024.4" },
     { name = "sqlglot", specifier = ">=25.0" },
 ]
-provides-extras = ["duckdb", "pandas", "polars", "spark", "azure", "s3", "sftp", "postgres", "mysql", "mongodb", "neo4j", "delta", "iceberg", "all"]
+provides-extras = ["duckdb", "pandas", "polars", "spark", "azure", "s3", "sftp", "postgres", "mysql", "mongodb", "neo4j", "xml", "delta", "iceberg", "all"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -2793,6 +2809,11 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/c9/bc/1c6a92f385940f727daeecf3bacaf186e03875dff57197801046c583bcf0/pymysql-1.2.0.tar.gz", hash = "sha256:6c7b17ca686988104d7426c27895b455cdeea3e9d3ceb1270f0c3704fead8c33", size = 49021, upload-time = "2026-05-19T08:26:22.302Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c4/bd/2534e130295c8cfd4f0a2e31623baab7502278f1e97bcfe61db75656a77f/pymysql-1.2.0-py3-none-any.whl", hash = "sha256:62169ce6d5510f08e140c5e7990ee884a9764024e4a9a27b2cc11f1099322ae0", size = 45716, upload-time = "2026-05-19T08:26:20.974Z" },
+]
+
+[package.optional-dependencies]
+rsa = [
+    { name = "cryptography" },
 ]
 
 [[package]]

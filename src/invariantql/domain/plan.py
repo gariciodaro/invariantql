@@ -315,7 +315,7 @@ def _node_from_dict(data: dict[str, Any]) -> PlanNode:
     if op == "project":
         return Project(child, tuple(expression_from_dict(e) for e in data["expressions"]))
     if op == "limit":
-        return Limit(child, int(data["count"]))
+        return Limit(child, data["count"])
     raise ValueError(f"unknown plan operation: {op!r}")
 
 

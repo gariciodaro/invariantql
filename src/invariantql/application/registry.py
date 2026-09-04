@@ -40,6 +40,9 @@ class Registry:
                 code=DiagnosticCode.SOURCE_ALREADY_REGISTERED,
                 target=name,
             )
+        previous = self._sources.get(name)
+        if previous is not None and previous is not source:
+            previous.close()
         self._sources[name] = source
         return source
 
@@ -73,6 +76,9 @@ class Registry:
                 code=DiagnosticCode.ENGINE_UNKNOWN,
                 target=engine.name,
             )
+        previous = self._engines.get(engine.name)
+        if previous is not None and previous is not engine:
+            previous.close()
         self._engines[engine.name] = engine
         return engine
 

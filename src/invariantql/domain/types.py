@@ -159,6 +159,7 @@ class StructType(DataType):
 
 
 NUMERIC_KINDS = frozenset({"integer", "float", "decimal"})
+PORTABLE_DECIMAL_PRECISION = 38
 
 
 def is_numeric(data_type: DataType) -> bool:
@@ -179,17 +180,154 @@ def is_comparable(left: DataType, right: DataType) -> bool:
     return left.kind == right.kind
 
 
-def unify(left: DataType, right: DataType) -> DataType:
-    """Pick the wider of two comparable types for a result column."""
+def unify(
+    left: DataType,
+    right: DataType,
+    *,
+    operation: str | None = None,
+) -> DataType:
+    """Return a symmetric common type, optionally for an arithmetic operation.
 
+    ``operation`` is one of ``+``, ``-``, ``*`` or ``/``.  Supplying it makes
+    decimal precision/scale derivation operation-aware; omitting it computes a
+    type capable of representing values from either input (used by schema
+    inference). Arithmetic must fit the Local+Spark 38-digit profile without
+    lossy scale reduction; descriptive unification may retain Arrow
+    decimal256 precision up to 76.
+    """
+
+    if operation not in (None, "+", "-", "*", "/"):
+        raise ValueError(f"unsupported numeric operation: {operation!r}")
+    if operation == "/":
+        return FloatType(64)
+    if operation is not None and (isinstance(left, UnknownType) or isinstance(right, UnknownType)):
+        # A concrete execution can refine a parameter after substitution, but
+        # inspection without parameter values must not promise the other
+        # operand's type.
+        return UnknownType()
+
+    # Null and unknown are identities when one concrete type is available.
+    # For the otherwise ambiguous null/unknown pair, unknown is the honest
+    # result regardless of operand order.
+    if left.kind in ("null", "unknown") and right.kind in ("null", "unknown"):
+        if left.kind == "unknown" or right.kind == "unknown":
+            return UnknownType()
+        return NullType()
     if left.kind in ("null", "unknown"):
         return right
     if right.kind in ("null", "unknown"):
         return left
-    if is_numeric(left) and is_numeric(right):
-        order = {"integer": 0, "decimal": 1, "float": 2}
-        return left if order[left.kind] >= order[right.kind] else right
-    return left
+
+    if not (is_numeric(left) and is_numeric(right)):
+        return left if left == right else UnknownType()
+
+    if isinstance(left, FloatType) or isinstance(right, FloatType):
+        # Mixing a 32-bit float with any exact numeric can require more than
+        # 24 bits of mantissa.  Only two float32 inputs safely remain float32.
+        if isinstance(left, FloatType) and isinstance(right, FloatType):
+            return FloatType(max(left.bits, right.bits))
+        return FloatType(64)
+
+    if isinstance(left, IntegerType) and isinstance(right, IntegerType):
+        if operation is not None:
+            # All integer arithmetic uses the shared signed-64 execution type.
+            # Engines apply checked operations and return NULL on int64
+            # overflow, avoiding DuckDB errors versus Spark wraparound.
+            return IntegerType(64)
+        return IntegerType(max(left.bits, right.bits))
+
+    left_decimal = _as_decimal(left)
+    right_decimal = _as_decimal(right)
+    left_integral = left_decimal.precision - left_decimal.scale
+    right_integral = right_decimal.precision - right_decimal.scale
+
+    if operation in ("+", "-"):
+        scale = max(left_decimal.scale, right_decimal.scale)
+        integral = max(left_integral, right_integral) + 1
+    elif operation == "*":
+        scale = left_decimal.scale + right_decimal.scale
+        integral = left_integral + right_integral + 1
+    else:
+        scale = max(left_decimal.scale, right_decimal.scale)
+        integral = max(left_integral, right_integral)
+    # Arrow can describe decimal256 values up to 76 digits, which is useful
+    # for faithfully reporting source schemas.  The executable Local+Spark
+    # profile is deliberately narrower: both DuckDB and Spark cap arithmetic
+    # decimals at 38 digits. Reject operations that would need fractional
+    # truncation because DuckDB cannot reproduce Spark's intermediate decimal
+    # arithmetic exactly in that range.
+    maximum = PORTABLE_DECIMAL_PRECISION if operation is not None else 76
+    if integral > maximum:
+        raise ValueError(
+            f"decimal result needs {integral} integral digits; the portable maximum is {maximum}"
+        )
+    if operation is not None and integral + scale > maximum:
+        raise ValueError(
+            f"decimal result needs precision {integral + scale}; "
+            f"the portable maximum is {maximum} without scale reduction"
+        )
+    return _bounded_decimal(integral, scale, maximum=maximum)
+
+
+def _as_decimal(data_type: DataType) -> DecimalType:
+    if isinstance(data_type, DecimalType):
+        return data_type
+    if isinstance(data_type, IntegerType):
+        digits = {8: 3, 16: 5, 32: 10, 64: 19}[data_type.bits]
+        return DecimalType(digits, 0)
+    raise TypeError(f"cannot convert {data_type} to an exact decimal type")
+
+
+def _bounded_decimal(integral: int, scale: int, *, maximum: int) -> DecimalType:
+    integral = max(integral, 0)
+    scale = max(scale, 0)
+    if integral > maximum:
+        raise ValueError(
+            f"decimal result needs {integral} integral digits; the portable maximum is {maximum}"
+        )
+    if integral + scale <= maximum:
+        return DecimalType(max(integral + scale, 1), scale)
+    retained_scale = max(0, maximum - integral)
+    return DecimalType(maximum, retained_scale)
+
+
+def is_portable_type(data_type: DataType) -> bool:
+    """Whether both first-release engines can represent ``data_type``.
+
+    Decimal256 remains a valid descriptive source type, but DuckDB and Spark
+    share a 38-digit executable decimal ceiling.  Nested types inherit the
+    restriction recursively.
+    """
+
+    if isinstance(data_type, DecimalType):
+        return data_type.precision <= PORTABLE_DECIMAL_PRECISION
+    if isinstance(data_type, ListType):
+        return is_portable_type(data_type.element)
+    if isinstance(data_type, StructType):
+        return all(is_portable_type(field_type) for _, field_type in data_type.fields)
+    return True
+
+
+def normalise_portable_type(data_type: DataType) -> DataType:
+    """Return the engine-independent result-boundary representation.
+
+    Spark timestamps with a time zone represent UTC instants without retaining
+    a per-column zone identifier.  Normalize every aware timestamp to UTC so
+    Arrow/DuckDB and Spark expose the same declared result type.  Apply the
+    rule recursively inside lists and structs.
+    """
+
+    if isinstance(data_type, TimestampType) and data_type.timezone is not None:
+        return TimestampType("UTC")
+    if isinstance(data_type, ListType):
+        return ListType(normalise_portable_type(data_type.element))
+    if isinstance(data_type, StructType):
+        return StructType(
+            tuple(
+                (name, normalise_portable_type(field_type)) for name, field_type in data_type.fields
+            )
+        )
+    return data_type
 
 
 def type_from_dict(data: dict[str, Any]) -> DataType:
@@ -223,6 +361,7 @@ def type_from_dict(data: dict[str, Any]) -> DataType:
 
 __all__ = [
     "NUMERIC_KINDS",
+    "PORTABLE_DECIMAL_PRECISION",
     "BinaryType",
     "BooleanType",
     "DataType",
@@ -238,6 +377,8 @@ __all__ = [
     "UnknownType",
     "is_comparable",
     "is_numeric",
+    "is_portable_type",
+    "normalise_portable_type",
     "type_from_dict",
     "unify",
 ]

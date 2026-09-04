@@ -14,7 +14,7 @@ from invariantql.ports.format_handler import (
 from invariantql.ports.frontend import QueryFrontend
 from invariantql.ports.source import DataSource, FileRelation, NativeRelation
 from invariantql.ports.storage import ObjectInfo, Storage, StorageCapabilities
-from invariantql.ports.streams import RecordBatchStream
+from invariantql.ports.streams import LocalResult, RecordBatchStream
 
 __all__ = [
     "CompilingExecutionEngine",
@@ -24,6 +24,7 @@ __all__ = [
     "FileRelation",
     "LocalExecutionEngine",
     "LocalFormatHandler",
+    "LocalResult",
     "NativeRelation",
     "ObjectInfo",
     "QueryFrontend",

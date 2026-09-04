@@ -31,7 +31,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # Local execution engine (ADR-0011) and the Arrow result boundary (ADR-0005).
-duckdb = ["duckdb>=1.1", "pyarrow>=15.0", "fsspec>=2024.3"]
+duckdb = ["duckdb>=1.2", "pyarrow>=15.0", "fsspec>=2024.3"]
 # Bounded local materialisations.
 pandas = ["pandas>=2.0", "pyarrow>=15.0"]
 polars = ["polars>=1.0", "pyarrow>=15.0"]
@@ -43,14 +43,15 @@ s3 = ["s3fs>=2024.4", "fsspec>=2024.3"]
 sftp = ["paramiko>=3.4", "fsspec>=2024.3"]
 # Native query sources.
 postgres = ["psycopg[binary]>=3.1", "pyarrow>=15.0"]
-mysql = ["pymysql>=1.1", "pyarrow>=15.0"]
+mysql = ["pymysql[rsa]>=1.1", "pyarrow>=15.0"]
 mongodb = ["pymongo>=4.6", "pyarrow>=15.0"]
 neo4j = ["neo4j>=5.15", "pyarrow>=15.0"]
 # Table formats that need their own reader library locally.
+xml = ["defusedxml>=0.7", "pyarrow>=15.0"]
 delta = ["deltalake>=0.18", "pyarrow>=15.0"]
 iceberg = ["pyiceberg>=0.7", "pyarrow>=15.0"]
 all = [
-  "invariantql[duckdb,pandas,polars,spark,azure,s3,sftp,postgres,mysql,mongodb,neo4j,delta,iceberg]",
+  "invariantql[duckdb,pandas,polars,spark,azure,s3,sftp,postgres,mysql,mongodb,neo4j,xml,delta,iceberg]",
 ]
 
 [project.urls]
@@ -104,6 +105,8 @@ known-first-party = ["invariantql"]
 [tool.pyright]
 include = ["src"]
 pythonVersion = "3.10"
+venvPath = "."
+venv = ".venv"
 typeCheckingMode = "standard"
 reportMissingImports = "warning"
 reportMissingModuleSource = "none"
@@ -137,7 +140,7 @@ source_modules = ["invariantql.domain", "invariantql.ports", "invariantql.applic
 forbidden_modules = [
   "sqlglot", "duckdb", "pyarrow", "pyspark", "pandas", "polars", "fsspec", "adlfs", "s3fs",
   "paramiko", "azure", "boto3", "botocore", "psycopg", "pymysql", "pymongo", "neo4j",
-  "deltalake", "pyiceberg",
+  "deltalake", "pyiceberg", "defusedxml",
 ]
 
 [[tool.importlinter.contracts]]

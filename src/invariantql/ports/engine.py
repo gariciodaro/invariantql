@@ -16,7 +16,7 @@ from invariantql.domain.execution import ExecutionPlan
 from invariantql.domain.expressions import Literal
 from invariantql.domain.schema import Schema
 from invariantql.ports.source import DataSource
-from invariantql.ports.streams import RecordBatchStream
+from invariantql.ports.streams import LocalResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +56,7 @@ class LocalExecutionEngine(ExecutionEngine, Protocol):
         parameters: Mapping[str, Literal],
         *,
         batch_size: int,
-    ) -> RecordBatchStream: ...
+    ) -> LocalResult: ...
 
 
 @runtime_checkable

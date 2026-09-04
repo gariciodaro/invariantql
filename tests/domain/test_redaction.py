@@ -73,6 +73,18 @@ def test_secret_options_never_reveal_by_accident() -> None:
     assert secrets != SecretOptions({"password": "topsecret-pw-1", "user": "alice"})
 
 
+def test_short_registered_secrets_are_scrubbed_without_corrupting_words() -> None:
+    clear_secrets()
+    try:
+        SecretOptions({"password": "p4ss", "user": "a"})
+        message = redact_exception(RuntimeError("database a rejected p4ss"))
+        assert "p4ss" not in message
+        assert "database" in message
+        assert message.endswith(f"database {REDACTED} rejected {REDACTED}")
+    finally:
+        clear_secrets()
+
+
 def test_redact_mapping_masks_secret_keys_and_scrubs_values() -> None:
     out = redact_mapping(
         {"account_key": "k", "url": "https://u:pw@h/", "nested": {"token": "t"}, "n": 1}

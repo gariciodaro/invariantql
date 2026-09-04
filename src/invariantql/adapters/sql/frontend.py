@@ -42,7 +42,7 @@ from invariantql.domain.expressions import (
     Parameter,
 )
 from invariantql.domain.plan import QueryPlan
-from invariantql.domain.types import DateType, DecimalType, TimestampType
+from invariantql.domain.types import DateType, TimestampType
 
 SQL_PROFILE_VERSION = "1"
 
@@ -187,6 +187,12 @@ class _Translator:
         self.qualifiers = {self.source_name}
         alias = table.args.get("alias")
         if alias is not None and alias.this is not None:
+            if alias.args.get("columns"):
+                raise SqlFrontendError(
+                    "table alias column lists are not supported",
+                    code=DiagnosticCode.SQL_UNSUPPORTED_CONSTRUCT,
+                    details={"construct": "table_alias_columns"},
+                )
             self.qualifiers.add(alias.this.name)
         return self.source_name
 
@@ -258,6 +264,8 @@ class _Translator:
                 )
             return Parameter(node.this)
         if isinstance(node, exp.Neg):
+            if isinstance(node.this, exp.Literal) and not node.this.is_string:
+                return self._numeric_literal("-" + str(node.this.this))
             inner = self._expression(node.this)
             if (
                 isinstance(inner, Literal)
@@ -397,14 +405,16 @@ class _Translator:
     def _literal(self, node: exp.Literal) -> Literal:
         if node.is_string:
             return Literal.of(str(node.this))
-        text = str(node.this)
+        return self._numeric_literal(str(node.this))
+
+    def _numeric_literal(self, text: str) -> Literal:
         try:
             if text.lstrip("-").isdigit():
                 return Literal.of(int(text))
             if any(c in text for c in ("e", "E")):
                 return Literal.of(float(text))
-            return Literal(Decimal(text), _decimal_type(Decimal(text)))
-        except (ValueError, InvalidOperation):
+            return Literal.of(Decimal(text))
+        except (ValueError, TypeError, InvalidOperation):
             raise SqlFrontendError(
                 f"invalid numeric literal {text!r}",
                 code=DiagnosticCode.SQL_UNSUPPORTED_EXPRESSION,
@@ -435,13 +445,6 @@ class _Translator:
             code=DiagnosticCode.SQL_UNSUPPORTED_EXPRESSION,
             details={"expression": "Cast"},
         )
-
-
-def _decimal_type(value: Decimal) -> DecimalType:
-    _sign, digits, exponent = value.as_tuple()
-    scale = -exponent if isinstance(exponent, int) and exponent < 0 else 0
-    precision = max(len(digits), scale + 1)
-    return DecimalType(min(max(precision, 1), 38), min(scale, 38))
 
 
 def _describe(node: exp.Expression) -> str:

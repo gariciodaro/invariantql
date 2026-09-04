@@ -9,6 +9,7 @@ by the frontend rather than silently approximated.
 from __future__ import annotations
 
 import datetime as _dt
+import math
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from decimal import Decimal
@@ -97,6 +98,10 @@ class Literal(Expression):
     kind: ClassVar[ExpressionKind] = ExpressionKind.LITERAL
     value: LiteralValue
     data_type: DataType
+
+    def __post_init__(self) -> None:
+        _validate_literal_value(self.value)
+        _validate_literal_data_type(self.value, self.data_type)
 
     @classmethod
     def of(cls, value: LiteralValue) -> Literal:
@@ -341,6 +346,7 @@ class Alias(Expression):
 
 
 def infer_literal_type(value: LiteralValue) -> DataType:
+    _validate_literal_value(value)
     if value is None:
         return NullType()
     if isinstance(value, bool):
@@ -350,10 +356,8 @@ def infer_literal_type(value: LiteralValue) -> DataType:
     if isinstance(value, float):
         return FloatType(64)
     if isinstance(value, Decimal):
-        _sign, digits, exponent = value.as_tuple()
-        scale = -exponent if isinstance(exponent, int) and exponent < 0 else 0
-        precision = max(len(digits), scale + 1)
-        return DecimalType(min(max(precision, 1), 76), min(scale, 76))
+        precision, scale = _decimal_shape(value)
+        return DecimalType(precision, scale)
     if isinstance(value, str):
         return StringType()
     if isinstance(value, bytes):
@@ -364,6 +368,75 @@ def infer_literal_type(value: LiteralValue) -> DataType:
     if isinstance(value, _dt.date):
         return DateType()
     raise TypeError(f"unsupported literal value: {type(value).__name__}")
+
+
+def _validate_literal_value(value: Any) -> None:
+    if value is None or isinstance(value, (bool, str, bytes, _dt.date)):
+        return
+    if isinstance(value, int):
+        if not -(2**63) <= value <= 2**63 - 1:
+            raise ValueError("integer literal is outside the signed 64-bit portable range")
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("floating-point literals must be finite")
+        return
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise ValueError("decimal literals must be finite")
+        _decimal_shape(value)
+        return
+    raise TypeError(f"unsupported literal value: {type(value).__name__}")
+
+
+def _validate_literal_data_type(value: LiteralValue, data_type: DataType) -> None:
+    """Reject falsely typed literals at construction and deserialisation boundaries."""
+
+    if not isinstance(data_type, DataType):
+        raise TypeError("literal data_type must be a DataType")
+    if value is None:
+        return  # contextual typed NULLs are valid
+    if isinstance(value, bool):
+        valid = isinstance(data_type, BooleanType)
+    elif isinstance(value, int):
+        valid = isinstance(data_type, IntegerType) and (
+            -(2 ** (data_type.bits - 1)) <= value <= 2 ** (data_type.bits - 1) - 1
+        )
+    elif isinstance(value, float):
+        valid = isinstance(data_type, FloatType) and (
+            data_type.bits == 64 or abs(value) <= 3.4028234663852886e38
+        )
+    elif isinstance(value, Decimal):
+        if isinstance(data_type, DecimalType):
+            precision, scale = _decimal_shape(value)
+            integral = 0 if value.is_zero() else precision - scale
+            valid = scale <= data_type.scale and integral <= data_type.precision - data_type.scale
+        else:
+            valid = False
+    elif isinstance(value, str):
+        valid = isinstance(data_type, StringType)
+    elif isinstance(value, bytes):
+        valid = isinstance(data_type, BinaryType)
+    elif isinstance(value, _dt.datetime):
+        aware = value.tzinfo is not None and value.utcoffset() is not None
+        valid = isinstance(data_type, TimestampType) and aware == (data_type.timezone is not None)
+    elif isinstance(value, _dt.date):
+        valid = isinstance(data_type, DateType)
+    else:  # guarded by _validate_literal_value
+        valid = False
+    if not valid:
+        raise ValueError(f"literal value {value!r} is not representable as {data_type}")
+
+
+def _decimal_shape(value: Decimal) -> tuple[int, int]:
+    _sign, digits, exponent = value.as_tuple()
+    if not isinstance(exponent, int):  # guarded by is_finite(), retained for typing
+        raise ValueError("decimal literals must be finite")
+    scale = max(-exponent, 0)
+    precision = max(len(digits) + max(exponent, 0), scale, 1)
+    if precision > 76 or scale > 76:
+        raise ValueError("decimal literal exceeds the portable precision of 76 digits")
+    return precision, scale
 
 
 def _encode_literal(value: LiteralValue) -> Any:

@@ -8,7 +8,7 @@ plans, fingerprints, or explain output.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -40,11 +40,18 @@ class SecretOptions(Mapping[str, Any]):
 
     __slots__ = ("_ref", "_values")
 
-    def __init__(self, values: Mapping[str, Any] | None = None, ref: CredentialRef | None = None):
+    def __init__(
+        self,
+        values: Mapping[str, Any] | None = None,
+        ref: CredentialRef | None = None,
+        *,
+        public_keys: Iterable[str] = (),
+    ):
         self._values: dict[str, Any] = dict(values or {})
         self._ref = ref
-        for value in self._values.values():
-            if isinstance(value, str) and len(value) >= 8:
+        public = frozenset(public_keys)
+        for key, value in self._values.items():
+            if key not in public and isinstance(value, str):
                 register_secret(value)
 
     @property

@@ -7,11 +7,19 @@ appears exactly once across the two halves unless the plan was rejected.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
 from invariantql.domain.explain import Disposition, ExplainPlan
-from invariantql.domain.expressions import Expression, conjuncts, output_name
+from invariantql.domain.expressions import (
+    Column,
+    Expression,
+    conjuncts,
+    output_name,
+    referenced_columns,
+    walk,
+)
 from invariantql.domain.plan import QueryPlan
 from invariantql.domain.schema import Schema
 
@@ -133,30 +141,123 @@ def check_completeness(execution_plan: ExecutionPlan) -> tuple[str, ...]:
     if execution_plan.explain.rejected:
         problems.append("executable plan contains rejected nodes")
 
-    logical = list(conjuncts(plan.predicate))
-    covered = list(conjuncts(pushed.predicate)) + list(conjuncts(residual.predicate))
-    if sorted(map(str, logical)) != sorted(map(str, covered)):
-        problems.append(
-            f"predicate conjuncts differ: logical={[str(c) for c in logical]} "
-            f"covered={[str(c) for c in covered]}"
-        )
+    scan_capabilities = execution_plan.explain.scan_capabilities or {}
+    engine_capabilities = execution_plan.explain.engine_capabilities or {}
+    logical = Counter(conjuncts(plan.predicate))
+    pushed_predicates = Counter(conjuncts(pushed.predicate))
+    residual_predicates = Counter(conjuncts(residual.predicate))
+    predicate_support = scan_capabilities.get("predicate")
+    if predicate_support not in ("full", "partial", "none"):
+        problems.append(f"unknown predicate support: {predicate_support!r}")
+    pushed_expression_kinds = set(scan_capabilities.get("expressions", ()))
+    pushed_parameters = bool(scan_capabilities.get("parameters", False))
+    for clause in pushed_predicates:
+        unsupported = {
+            node.kind.value
+            for node in walk(clause)
+            if node.kind.value not in pushed_expression_kinds
+            or (node.kind.value == "parameter" and not pushed_parameters)
+        }
+        if predicate_support == "none" or unsupported:
+            problems.append(
+                f"pushed predicate exceeds scan capabilities: clause={clause} "
+                f"support={predicate_support!r} unsupported={sorted(unsupported)}"
+            )
+    if predicate_support == "partial":
+        # Every predicate evaluated by a partially semantic scan must be
+        # rechecked, while predicates the scan cannot handle remain residual
+        # only.  The current pushed representation stores the complete
+        # predicate and lets the adapter apply its documented safe relaxation.
+        if residual_predicates != logical or pushed_predicates - logical:
+            problems.append(
+                "partial predicate coverage differs: "
+                f"logical={dict(logical)} pushed={dict(pushed_predicates)} "
+                f"residual={dict(residual_predicates)}"
+            )
+    else:
+        overlap = pushed_predicates & residual_predicates
+        covered = pushed_predicates + residual_predicates
+        if overlap or covered != logical:
+            problems.append(
+                "predicate conjuncts differ: "
+                f"logical={dict(logical)} pushed={dict(pushed_predicates)} "
+                f"residual={dict(residual_predicates)}"
+            )
+    residual_expression_kinds = set(engine_capabilities.get("residual_expressions", ()))
+    for clause in residual_predicates:
+        unsupported = {
+            node.kind.value
+            for node in walk(clause)
+            if node.kind.value not in residual_expression_kinds
+        }
+        if unsupported:
+            problems.append(
+                f"residual predicate exceeds engine capabilities: clause={clause} "
+                f"unsupported={sorted(unsupported)}"
+            )
 
     if plan.projection is not None:
-        if residual.projection is not None:
-            if tuple(residual.projection) != tuple(plan.projection):
-                problems.append("residual projection differs from logical projection")
+        projection_support = scan_capabilities.get("projection")
+        names = tuple(output_name(expression) for expression in plan.projection)
+        needed = referenced_columns(
+            *plan.projection,
+            *((residual.predicate,) if residual.predicate is not None else ()),
+        )
+        pure_columns = all(isinstance(expression, Column) for expression in plan.projection)
+        if projection_support == "full" and pure_columns and needed == names:
+            expected_pushed = names
+            expected_residual = None
         else:
-            names = tuple(output_name(e) for e in plan.projection)
-            if pushed.projection != names:
-                problems.append("projection neither pushed exactly nor residual")
-    elif residual.projection is not None:
-        problems.append("residual projection present without a logical projection")
+            expected_pushed = (
+                needed if projection_support in ("full", "partial") and needed else None
+            )
+            expected_residual = plan.projection
+        if pushed.projection != expected_pushed or residual.projection != expected_residual:
+            problems.append(
+                "projection placement differs: "
+                f"pushed={pushed.projection} expected_pushed={expected_pushed} "
+                f"residual={residual.projection} expected_residual={expected_residual} "
+                f"support={projection_support!r}"
+            )
+    elif residual.projection is not None or pushed.projection is not None:
+        problems.append("projection applied without a logical projection")
+    if residual.projection is not None:
+        if not bool(engine_capabilities.get("residual_projection", False)):
+            problems.append("residual projection exceeds engine capabilities")
+        unsupported_projection = {
+            node.kind.value
+            for expression in residual.projection
+            for node in walk(expression)
+            if node.kind.value not in residual_expression_kinds
+        }
+        if unsupported_projection:
+            problems.append(
+                "residual projection expression exceeds engine capabilities: "
+                f"unsupported={sorted(unsupported_projection)}"
+            )
 
     if plan.limit_count is not None:
-        if pushed.limit != plan.limit_count and residual.limit != plan.limit_count:
-            problems.append("limit neither pushed nor residual")
+        count = plan.limit_count
+        limit_support = scan_capabilities.get("limit")
+        if residual.predicate is not None:
+            valid_limit = pushed.limit is None and residual.limit == count
+        elif limit_support == "full":
+            valid_limit = pushed.limit == count and residual.limit is None
+        elif limit_support == "partial":
+            valid_limit = pushed.limit == count and residual.limit == count
+        elif limit_support == "none":
+            valid_limit = pushed.limit is None and residual.limit == count
+        else:
+            valid_limit = False
+        if not valid_limit:
+            problems.append(
+                f"limit placement differs: logical={count} pushed={pushed.limit} "
+                f"residual={residual.limit} support={limit_support!r}"
+            )
     elif pushed.limit is not None or residual.limit is not None:
         problems.append("limit applied without a logical limit")
+    if residual.limit is not None and not bool(engine_capabilities.get("residual_limit", False)):
+        problems.append("residual limit exceeds engine capabilities")
 
     for node in execution_plan.explain.nodes:
         if node.disposition is Disposition.REJECTED:

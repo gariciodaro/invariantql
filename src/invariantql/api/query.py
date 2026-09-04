@@ -12,7 +12,7 @@ from invariantql.domain.explain import ExplainPlan
 from invariantql.domain.expressions import Column, Expression
 from invariantql.domain.plan import QueryPlan
 from invariantql.domain.schema import Schema
-from invariantql.ports.streams import RecordBatchStream
+from invariantql.ports.streams import LocalResult
 
 if TYPE_CHECKING:
     from invariantql.api.context import Context
@@ -85,7 +85,7 @@ class Query:
         *,
         engine: str | None = None,
         params: Mapping[str, Any] | None = None,
-    ) -> RecordBatchStream:
+    ) -> LocalResult:
         return self._context.service.preview(
             self._plan, rows=rows, engine=engine, parameters=params
         )
@@ -96,7 +96,7 @@ class Query:
         engine: str | None = None,
         params: Mapping[str, Any] | None = None,
         batch_size: int | None = None,
-    ) -> RecordBatchStream:
+    ) -> LocalResult:
         return self._context.service.execute(
             self._plan, engine=engine, parameters=params, batch_size=batch_size
         )

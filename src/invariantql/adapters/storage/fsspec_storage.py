@@ -8,6 +8,7 @@ secrets other libraries need to read the same locations themselves.
 from __future__ import annotations
 
 import datetime as _dt
+import posixpath
 from collections.abc import Callable, Iterator
 from typing import Any, BinaryIO
 
@@ -37,7 +38,7 @@ class FsspecStorage:
         self._name = name
         self._scheme = scheme
         self._netloc = netloc
-        self._root = root.strip("/")
+        self._root = _normalise_path(root, absolute=False)
         self._capabilities = capabilities
         self._native_scheme = native_scheme
         self._native_options = native_options
@@ -72,13 +73,27 @@ class FsspecStorage:
                         f"location {path.uri} does not belong to storage {self._name!r}",
                         code=DiagnosticCode.STORAGE_UNSUPPORTED_OPERATION,
                     )
-                return Location(path.path, self._scheme, self._netloc)
+                resolved_path = _normalise_path(path.path, absolute=True)
+                self._require_inside_root(resolved_path)
+                return Location(resolved_path, self._scheme, self._netloc)
             raw = path.path
         else:
             raw = path
-        raw = raw.lstrip("/")
-        full = "/" + "/".join(p for p in (self._root, raw) if p)
+        relative = _normalise_path(raw, absolute=False)
+        joined = "/".join(part for part in (self._root, relative) if part)
+        full = "/" + joined
+        self._require_inside_root(full)
         return Location(full, self._scheme, self._netloc)
+
+    def _require_inside_root(self, path: str) -> None:
+        if not self._root:
+            return
+        root = "/" + self._root
+        if path != root and not path.startswith(root + "/"):
+            raise StorageError(
+                f"location is outside storage {self._name!r}",
+                code=DiagnosticCode.STORAGE_UNSUPPORTED_OPERATION,
+            )
 
     def _default_fs_path(self, location: Location) -> str:
         path = location.path.lstrip("/")
@@ -171,7 +186,7 @@ class FsspecStorage:
         size = raw.get("size")
         modified = raw.get("mtime") or raw.get("LastModified") or raw.get("last_modified")
         return ObjectInfo(
-            self._from_fs_path(name),
+            self.resolve(self._from_fs_path(name)),
             None if is_dir or size is None else int(size),
             _to_datetime(modified),
             is_dir,
@@ -197,6 +212,21 @@ def _to_datetime(value: Any) -> _dt.datetime | None:
         except ValueError:
             return None
     return None
+
+
+def _normalise_path(path: str, *, absolute: bool) -> str:
+    """Normalise a provider path without allowing parent-directory traversal."""
+
+    text = str(path)
+    if "\0" in text or any(part == ".." for part in text.split("/")):
+        raise StorageError(
+            "storage paths must not contain NUL or parent-directory segments",
+            code=DiagnosticCode.STORAGE_UNSUPPORTED_OPERATION,
+        )
+    normalised = posixpath.normpath("/" + text.lstrip("/"))
+    if normalised == "/":
+        return "/" if absolute else ""
+    return normalised if absolute else normalised.lstrip("/")
 
 
 __all__ = ["FsspecStorage"]

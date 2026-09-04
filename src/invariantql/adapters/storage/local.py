@@ -46,7 +46,7 @@ class LocalStorage:
 
     def resolve(self, path: str | Location) -> Location:
         if isinstance(path, Location):
-            if path.scheme and path.scheme != "file":
+            if path.scheme and (path.scheme != "file" or path.netloc):
                 raise StorageError(
                     f"location {path.uri} does not belong to local storage",
                     code=DiagnosticCode.STORAGE_UNSUPPORTED_OPERATION,
@@ -54,10 +54,24 @@ class LocalStorage:
             raw = path.path
         else:
             raw = path
-        candidate = Path(raw).expanduser()
+        try:
+            candidate = Path(raw).expanduser()
+        except (OSError, ValueError) as exc:
+            raise StorageError(
+                f"invalid local storage path: {exc}",
+                code=DiagnosticCode.STORAGE_UNSUPPORTED_OPERATION,
+            ) from None
         if not candidate.is_absolute():
             candidate = self._root / candidate
-        return Location(str(candidate.resolve()), "file", "")
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(self._root)
+        except ValueError:
+            raise StorageError(
+                f"location is outside local storage root {self._root}",
+                code=DiagnosticCode.STORAGE_UNSUPPORTED_OPERATION,
+            ) from None
+        return Location(str(resolved), "file", "")
 
     def _path(self, location: Location) -> Path:
         return Path(self.resolve(location).path)

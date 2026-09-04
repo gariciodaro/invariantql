@@ -34,6 +34,7 @@ PROVIDERS = {
     "neo4j",
     "deltalake",
     "pyiceberg",
+    "defusedxml",
     "numpy",
 }
 STDLIB = set(sys.stdlib_module_names)

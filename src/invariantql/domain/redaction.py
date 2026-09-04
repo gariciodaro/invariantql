@@ -76,7 +76,18 @@ def redact(text: str) -> str:
     with _lock:
         secrets = sorted(_registry, key=len, reverse=True)
     for secret in secrets:
-        text = text.replace(secret, REDACTED)
+        if len(secret) >= 8:
+            text = text.replace(secret, REDACTED)
+        else:
+            # Replacing a short value as a raw substring would turn a secret
+            # such as ``a`` into noise throughout every diagnostic.  Short
+            # credentials are still scrubbed when they occur as a complete
+            # token (including inside URI user-info and key/value text).
+            text = re.sub(
+                rf"(?<![A-Za-z0-9]){re.escape(secret)}(?![A-Za-z0-9])",
+                REDACTED,
+                text,
+            )
     text = _PATTERNS[3].sub(lambda m: f"{m.group(1)}{REDACTED}", text)
     text = _PATTERNS[2].sub(lambda m: f"{m.group(1)}{REDACTED}{m.group(3)}", text)
     text = _PATTERNS[1].sub(lambda m: f"{m.group(1)}{REDACTED}{m.group(4)}", text)

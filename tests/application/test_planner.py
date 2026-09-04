@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
@@ -187,7 +189,9 @@ def test_partial_predicate_pushdown_keeps_limit_residual() -> None:
         projection=Support.FULL,
         predicate=Support.FULL,
         limit=Support.FULL,
-        expressions={ExpressionKind.COLUMN, ExpressionKind.LITERAL, ExpressionKind.COMPARISON},
+        expressions=frozenset(
+            {ExpressionKind.COLUMN, ExpressionKind.LITERAL, ExpressionKind.COMPARISON}
+        ),
     )
     ep = PLANNER.plan(bind_plan(plan, SCHEMA), _target(caps))
     f, limit = ep.explain.node("1-filter"), ep.explain.node("2-limit")
@@ -209,6 +213,154 @@ def test_parameters_are_not_pushed_without_parameter_support() -> None:
     assert ep.explain.node("1-filter").reason_code is DiagnosticCode.RESIDUAL_UNSUPPORTED_EXPRESSION
 
 
+def test_partial_predicate_is_rechecked_by_the_engine() -> None:
+    predicate = Comparison(ComparisonOp.GT, Column("a"), Literal.of(1))
+    caps = PushdownCapabilities(
+        predicate=Support.PARTIAL,
+        expressions=ALL_EXPRESSION_KINDS,
+        parameters=True,
+        evidence=("safe relaxation",),
+    )
+    ep = PLANNER.plan(bind_plan(QueryPlan.scan("t").where(predicate), SCHEMA), _target(caps))
+    assert ep.pushed.predicate == predicate
+    assert ep.residual.predicate == predicate
+    assert ep.explain.node("1-filter").disposition is Disposition.PARTIAL
+    assert check_completeness(ep) == ()
+
+    missing_recheck = replace(ep, residual=replace(ep.residual, predicate=None))
+    assert "partial predicate coverage differs" in check_completeness(missing_recheck)[0]
+
+
+def test_engine_can_implicitly_conjoin_top_level_residual_clauses() -> None:
+    expression_kinds = frozenset(
+        {
+            ExpressionKind.COLUMN,
+            ExpressionKind.LITERAL,
+            ExpressionKind.COMPARISON,
+        }
+    )
+    predicate = And(
+        (
+            Comparison(ComparisonOp.GT, Column("a"), Literal.of(1)),
+            Comparison(ComparisonOp.LT, Column("b"), Literal.of(5)),
+        )
+    )
+    engine = EngineCapabilities("conjunctive", residual_expressions=expression_kinds)
+    assert engine.supports_expression(predicate)
+    ep = PLANNER.plan(
+        bind_plan(QueryPlan.scan("t").where(predicate), SCHEMA),
+        _target(PushdownCapabilities.none(), engine),
+    )
+    assert ep.executable
+
+
+def test_completeness_rejects_duplicate_full_predicate_evaluation() -> None:
+    predicate = Comparison(ComparisonOp.GT, Column("a"), Literal.of(1))
+    ep = PLANNER.plan(
+        bind_plan(QueryPlan.scan("t").where(predicate), SCHEMA),
+        _target(PushdownCapabilities.full()),
+    )
+    duplicate = replace(ep, residual=replace(ep.residual, predicate=predicate))
+    assert "predicate conjuncts differ" in check_completeness(duplicate)[0]
+
+
+def test_completeness_rejects_predicates_pushed_beyond_scan_capabilities() -> None:
+    predicate = Comparison(ComparisonOp.GT, Column("a"), Literal.of(1))
+    none = PLANNER.plan(
+        bind_plan(QueryPlan.scan("t").where(predicate), SCHEMA),
+        _target(PushdownCapabilities.none()),
+    )
+    forged_none = replace(
+        none,
+        pushed=replace(none.pushed, predicate=predicate),
+        residual=replace(none.residual, predicate=None),
+    )
+    assert any("exceeds scan capabilities" in issue for issue in check_completeness(forged_none))
+
+    partial_caps = PushdownCapabilities(
+        predicate=Support.PARTIAL,
+        expressions=frozenset({ExpressionKind.COLUMN, ExpressionKind.LITERAL}),
+    )
+    partial = PLANNER.plan(
+        bind_plan(QueryPlan.scan("t").where(predicate), SCHEMA),
+        _target(partial_caps),
+    )
+    forged_partial = replace(partial, pushed=replace(partial.pushed, predicate=predicate))
+    assert any("exceeds scan capabilities" in issue for issue in check_completeness(forged_partial))
+
+
+def test_completeness_rejects_residual_work_beyond_engine_capabilities() -> None:
+    predicate = Comparison(ComparisonOp.GT, Column("a"), Literal.of(1))
+    weak = EngineCapabilities(
+        "weak",
+        residual_expressions=ALL_EXPRESSION_KINDS - {ExpressionKind.COMPARISON},
+    )
+    pushed = PLANNER.plan(
+        bind_plan(QueryPlan.scan("t").where(predicate), SCHEMA),
+        _target(PushdownCapabilities.full(), weak),
+    )
+    forged_predicate = replace(
+        pushed,
+        pushed=replace(pushed.pushed, predicate=None),
+        residual=replace(pushed.residual, predicate=predicate),
+    )
+    assert any(
+        "residual predicate exceeds" in issue for issue in check_completeness(forged_predicate)
+    )
+
+    computed = PLANNER.plan(
+        bind_plan(
+            QueryPlan.scan("t").select(
+                Alias(Arithmetic(ArithmeticOp.ADD, Column("a"), Literal.of(1)), "a1")
+            ),
+            SCHEMA,
+        ),
+        _target(PushdownCapabilities.full()),
+    )
+    no_projection = replace(
+        computed.explain,
+        engine_capabilities={
+            **(computed.explain.engine_capabilities or {}),
+            "residual_projection": False,
+        },
+    )
+    assert "residual projection exceeds engine capabilities" in check_completeness(
+        replace(computed, explain=no_projection)
+    )
+
+    limited = PLANNER.plan(
+        bind_plan(QueryPlan.scan("t").limit(1), SCHEMA),
+        _target(PushdownCapabilities.none()),
+    )
+    no_limit = replace(
+        limited.explain,
+        engine_capabilities={
+            **(limited.explain.engine_capabilities or {}),
+            "residual_limit": False,
+        },
+    )
+    assert "residual limit exceeds engine capabilities" in check_completeness(
+        replace(limited, explain=no_limit)
+    )
+
+
+def test_partial_predicate_is_rejected_when_engine_cannot_recheck_it() -> None:
+    predicate = Comparison(ComparisonOp.GT, Column("a"), Literal.of(1))
+    caps = PushdownCapabilities(
+        predicate=Support.PARTIAL,
+        expressions=ALL_EXPRESSION_KINDS,
+        parameters=True,
+    )
+    engine = EngineCapabilities(
+        "weak", residual_expressions=ALL_EXPRESSION_KINDS - {ExpressionKind.COMPARISON}
+    )
+    ep = PLANNER.plan(
+        bind_plan(QueryPlan.scan("t").where(predicate), SCHEMA), _target(caps, engine)
+    )
+    assert not ep.executable
+    assert ep.explain.node("1-filter").disposition is Disposition.REJECTED
+
+
 def test_computed_projection_prunes_columns_and_stays_residual() -> None:
     plan = (
         QueryPlan.scan("t")
@@ -223,6 +375,108 @@ def test_computed_projection_prunes_columns_and_stays_residual() -> None:
     assert ep.pushed.projection == ("a", "n")  # n is needed by the residual predicate
     assert ep.residual.projection == plan.projection
     assert ep.output_schema.names == ("a2",)
+
+
+def test_completeness_rejects_missing_residual_input_and_projection_on_select_star() -> None:
+    plan = QueryPlan.scan("t").select(
+        Alias(Arithmetic(ArithmeticOp.ADD, Column("a"), Column("b")), "total")
+    )
+    ep = PLANNER.plan(bind_plan(plan, SCHEMA), _target(PushdownCapabilities.full()))
+    missing_input = replace(ep, pushed=replace(ep.pushed, projection=("a",)))
+    assert "projection placement differs" in check_completeness(missing_input)[0]
+
+    select_all = PLANNER.plan(
+        bind_plan(QueryPlan.scan("t"), SCHEMA), _target(PushdownCapabilities.full())
+    )
+    silent_pruning = replace(select_all, pushed=replace(select_all.pushed, projection=("a",)))
+    assert "without a logical projection" in check_completeness(silent_pruning)[0]
+
+
+def test_constant_projection_reads_rows_instead_of_zero_columns() -> None:
+    plan = QueryPlan.scan("t").select(Alias(Literal.of(1), "one"))
+    ep = PLANNER.plan(bind_plan(plan, SCHEMA), _target(PushdownCapabilities.full("x")))
+    project = ep.explain.node("1-project")
+    assert project.disposition is Disposition.RESIDUAL
+    assert ep.pushed.projection is None
+    assert ep.residual.projection == plan.projection
+    assert "preserve row cardinality" in project.detail
+
+    zero_columns = replace(ep, pushed=replace(ep.pushed, projection=()))
+    assert "projection placement differs" in check_completeness(zero_columns)[0]
+
+
+def test_partial_projection_is_trimmed_by_the_engine() -> None:
+    plan = QueryPlan.scan("t").select("a")
+    caps = PushdownCapabilities(projection=Support.PARTIAL)
+    ep = PLANNER.plan(bind_plan(plan, SCHEMA), _target(caps))
+    assert ep.pushed.projection == ("a",)
+    assert ep.residual.projection == plan.projection
+    assert ep.explain.node("1-project").disposition is Disposition.PARTIAL
+
+    missing_enforcement = replace(ep, residual=replace(ep.residual, projection=None))
+    assert "projection placement differs" in check_completeness(missing_enforcement)[0]
+
+
+def test_projection_is_rejected_when_the_engine_lacks_the_expression() -> None:
+    plan = QueryPlan.scan("t").select(
+        Alias(Arithmetic(ArithmeticOp.ADD, Column("a"), Literal.of(1)), "a1")
+    )
+    engine = EngineCapabilities(
+        "weak", residual_expressions=ALL_EXPRESSION_KINDS - {ExpressionKind.ARITHMETIC}
+    )
+    ep = PLANNER.plan(bind_plan(plan, SCHEMA), _target(PushdownCapabilities.full(), engine))
+    assert not ep.executable
+    assert (
+        ep.explain.node("1-project").reason_code
+        is DiagnosticCode.REJECTED_ENGINE_UNSUPPORTED_EXPRESSION
+    )
+
+
+def test_projection_is_rejected_when_engine_cannot_project_residuals() -> None:
+    plan = QueryPlan.scan("t").select(
+        Alias(Arithmetic(ArithmeticOp.ADD, Column("a"), Literal.of(1)), "a1")
+    )
+    engine = EngineCapabilities("weak", residual_projection=False)
+    ep = PLANNER.plan(bind_plan(plan, SCHEMA), _target(PushdownCapabilities.full(), engine))
+    assert not ep.executable
+    assert (
+        ep.explain.node("1-project").reason_code
+        is DiagnosticCode.REJECTED_ENGINE_UNSUPPORTED_OPERATION
+    )
+
+
+@pytest.mark.parametrize("support", [Support.NONE, Support.PARTIAL])
+def test_limit_is_rejected_when_the_engine_cannot_enforce_a_residual(
+    support: Support,
+) -> None:
+    plan = QueryPlan.scan("t").limit(5)
+    caps = PushdownCapabilities(limit=support)
+    engine = EngineCapabilities("weak", residual_limit=False)
+    ep = PLANNER.plan(bind_plan(plan, SCHEMA), _target(caps, engine))
+    assert not ep.executable
+    assert (
+        ep.explain.node("1-limit").reason_code
+        is DiagnosticCode.REJECTED_ENGINE_UNSUPPORTED_OPERATION
+    )
+
+
+def test_completeness_enforces_partial_and_post_filter_limit_placement() -> None:
+    partial = PLANNER.plan(
+        bind_plan(QueryPlan.scan("t").limit(5), SCHEMA),
+        _target(PushdownCapabilities(limit=Support.PARTIAL)),
+    )
+    missing_recheck = replace(partial, residual=replace(partial.residual, limit=None))
+    assert "limit placement differs" in check_completeness(missing_recheck)[0]
+
+    plan = QueryPlan.scan("t").where(Like(Column("n"), Literal.of("x%"))).limit(5)
+    caps = PushdownCapabilities(
+        predicate=Support.FULL,
+        limit=Support.FULL,
+        expressions=frozenset({ExpressionKind.COLUMN, ExpressionKind.LITERAL}),
+    )
+    filtered = PLANNER.plan(bind_plan(plan, SCHEMA), _target(caps))
+    premature = replace(filtered, pushed=replace(filtered.pushed, limit=5))
+    assert "limit placement differs" in check_completeness(premature)[0]
 
 
 def test_rejected_when_neither_side_can_evaluate() -> None:

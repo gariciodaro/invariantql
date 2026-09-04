@@ -8,6 +8,7 @@ from typing import Any
 from invariantql.domain.diagnostics import DiagnosticCode, ParameterError
 from invariantql.domain.expressions import Literal
 from invariantql.domain.plan import QueryPlan
+from invariantql.domain.types import PORTABLE_DECIMAL_PRECISION, is_portable_type
 
 
 def bind_parameters(plan: QueryPlan, values: Mapping[str, Any] | None) -> dict[str, Literal]:
@@ -31,13 +32,21 @@ def bind_parameters(plan: QueryPlan, values: Mapping[str, Any] | None) -> dict[s
     for name in expected:
         value = supplied[name]
         try:
-            bound[name] = value if isinstance(value, Literal) else Literal.of(value)
-        except TypeError as exc:
+            literal = value if isinstance(value, Literal) else Literal.of(value)
+        except (TypeError, ValueError) as exc:
             raise ParameterError(
                 f"parameter {name!r} has unsupported type {type(value).__name__}",
                 code=DiagnosticCode.PARAMETER_INVALID,
                 details={"parameter": name},
             ) from exc
+        if not is_portable_type(literal.data_type):
+            raise ParameterError(
+                f"parameter {name!r} exceeds the Local+Spark decimal precision "
+                f"limit of {PORTABLE_DECIMAL_PRECISION}",
+                code=DiagnosticCode.PARAMETER_INVALID,
+                details={"parameter": name, "type": str(literal.data_type)},
+            )
+        bound[name] = literal
     return bound
 
 

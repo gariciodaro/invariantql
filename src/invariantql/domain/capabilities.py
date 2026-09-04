@@ -15,6 +15,7 @@ from invariantql.domain.expressions import (
     ALL_EXPRESSION_KINDS,
     Expression,
     ExpressionKind,
+    conjuncts,
     walk,
 )
 
@@ -94,7 +95,13 @@ class PushdownCapabilities:
 
 @dataclass(frozen=True, slots=True)
 class EngineCapabilities:
-    """What an execution engine can evaluate as residual work."""
+    """What an execution engine can evaluate as residual work.
+
+    As with scan capabilities, conjunction of top-level filter clauses is a
+    structural planner operation and does not require ``ExpressionKind.AND``.
+    An ``AND`` nested beneath ``OR`` or ``NOT`` remains an expression and must
+    be declared explicitly.
+    """
 
     name: str
     residual_expressions: frozenset[ExpressionKind] = ALL_EXPRESSION_KINDS
@@ -108,7 +115,11 @@ class EngineCapabilities:
         object.__setattr__(self, "evidence", tuple(self.evidence))
 
     def supports_expression(self, expression: Expression) -> bool:
-        return all(node.kind in self.residual_expressions for node in walk(expression))
+        return all(
+            node.kind in self.residual_expressions
+            for clause in conjuncts(expression)
+            for node in walk(clause)
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {

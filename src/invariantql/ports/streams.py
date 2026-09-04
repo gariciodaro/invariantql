@@ -1,8 +1,8 @@
-"""The local result boundary (ADR-0005).
+"""The local stream and materialization boundaries (ADR-0005).
 
-A ``RecordBatchStream`` is the structural shape of an Arrow record-batch
-reader: a schema, iteration over batches, and explicit closing. The port
-names no Arrow type; ``pyarrow.RecordBatchReader`` satisfies it at runtime.
+``RecordBatchStream`` is the minimal structural shape shared by sources and
+format handlers. ``LocalResult`` is the richer result returned to callers by
+a local engine. Neither protocol names an Arrow, pandas, or Polars type.
 """
 
 from __future__ import annotations
@@ -21,4 +21,31 @@ class RecordBatchStream(Protocol):
     def close(self) -> None: ...
 
 
-__all__ = ["RecordBatchStream"]
+@runtime_checkable
+class LocalResult(RecordBatchStream, Protocol):
+    """A local, Arrow-native result with explicit bounded materializers.
+
+    Return types stay provider-neutral at the port boundary: concrete engines
+    may expose richer Arrow, pandas, or Polars types while callers can rely on
+    these methods without importing an adapter implementation.
+    """
+
+    @property
+    def closed(self) -> bool: ...
+
+    def batches(self) -> Iterator[Any]: ...
+
+    def to_arrow(self, *, max_rows: int | None = 1_000_000) -> Any: ...
+
+    def to_pandas(self, *, max_rows: int | None = 1_000_000, **kwargs: Any) -> Any: ...
+
+    def to_polars(self, *, max_rows: int | None = 1_000_000) -> Any: ...
+
+    def rows(self, *, max_rows: int | None = 1_000_000) -> list[dict[str, Any]]: ...
+
+    def __enter__(self) -> LocalResult: ...
+
+    def __exit__(self, *exc: object) -> None: ...
+
+
+__all__ = ["LocalResult", "RecordBatchStream"]

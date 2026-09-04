@@ -45,6 +45,55 @@ def test_typed_values_survive(ctx) -> None:
     assert rows[1] == {"id": 4, "day": dt.date(2024, 1, 4), "active": None, "price": None}
 
 
+def test_decimal_operands_are_widened_before_arithmetic(tmp_path) -> None:
+    small = Decimal("999.99")
+    wide = Decimal("999999999999.999999")
+    path = tmp_path / "decimals.parquet"
+    pq.write_table(
+        pa.Table.from_pylist(
+            [{"small": small, "wide": wide}],
+            schema=pa.schema(
+                [
+                    pa.field("small", pa.decimal128(5, 2)),
+                    pa.field("wide", pa.decimal128(18, 6)),
+                ]
+            ),
+        ),
+        path,
+    )
+
+    with iql.Context() as context:
+        context.register_source(
+            iql.file_source(
+                "decimals",
+                iql.local_storage(tmp_path),
+                path.name,
+                iql.ParquetFormat(),
+            )
+        )
+        query = context.sql(
+            "SELECT small + wide AS added, small * wide AS multiplied FROM decimals"
+        )
+        logical = query.schema()
+        table = query.execute().to_arrow()
+
+    assert [str(field.data_type) for field in logical] == [
+        "decimal(19,6)",
+        "decimal(24,8)",
+    ]
+    assert table.to_pylist() == [
+        {
+            "added": small + wide,
+            "multiplied": small * wide,
+        }
+    ]
+
+
+def test_constant_projection_preserves_source_row_count(ctx) -> None:
+    result = ctx.sql("SELECT 1 AS one FROM orders").execute(batch_size=2)
+    assert result.to_arrow().to_pylist() == [{"one": 1}] * 6
+
+
 def test_predicate_semantics(ctx) -> None:
     sql = "SELECT id FROM orders WHERE {}"
     cases = {

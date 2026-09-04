@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 import invariantql as iql
-from invariantql.domain import DiagnosticCode, Disposition
+from invariantql.domain import DiagnosticCode, Disposition, SecretOptions
 
 pytestmark = pytest.mark.spark
 
@@ -109,3 +111,134 @@ def test_session_is_not_mutated_by_default(spark_ctx, spark, data_dir) -> None:
     before = conf.get("fs.s3a.access.key")
     spark_ctx.sql("SELECT id FROM orders").compile(engine="spark")
     assert conf.get("fs.s3a.access.key") == before
+
+
+class _FakeHadoopConfiguration:
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+
+    def set(self, key: str, value: str) -> None:
+        self.values[key] = value
+
+
+class _StorageOptions:
+    def __init__(self, **options: str) -> None:
+        self._options = SecretOptions(options)
+
+    def native_options(self) -> SecretOptions:
+        return self._options
+
+
+def _credential_engine():
+    from invariantql.adapters.spark_engine.engine import SparkEngine
+
+    conf = _FakeHadoopConfiguration()
+    jsc = SimpleNamespace(hadoopConfiguration=lambda: conf)
+    spark = SimpleNamespace(sparkContext=SimpleNamespace(_jsc=jsc))
+    return SparkEngine(spark), conf
+
+
+def test_explicit_azure_blob_credentials_use_wasb_configuration() -> None:
+    engine, conf = _credential_engine()
+    storage = _StorageOptions(
+        account_name="lake",
+        container="raw",
+        endpoint_kind="blob",
+        endpoint_suffix="core.chinacloudapi.cn",
+        sas_token="sig=secret",
+    )
+    expected = {
+        "fs.azure.sas.raw.lake.blob.core.chinacloudapi.cn": "sig=secret",
+    }
+    assert engine.apply_storage_credentials(storage) == expected  # type: ignore[arg-type]
+    assert conf.values == expected
+
+
+@pytest.mark.parametrize(
+    ("suffix", "authority"),
+    [
+        ("core.windows.net", "login.microsoftonline.com"),
+        ("core.chinacloudapi.cn", "login.chinacloudapi.cn"),
+        ("core.usgovcloudapi.net", "login.microsoftonline.us"),
+    ],
+)
+def test_explicit_adls_service_principal_uses_abfs_configuration(
+    suffix: str, authority: str
+) -> None:
+    engine, conf = _credential_engine()
+    storage = _StorageOptions(
+        account_name="lake",
+        container="raw",
+        endpoint_kind="dfs",
+        endpoint_suffix=suffix,
+        client_id="client",
+        client_secret="secret",
+        tenant_id="tenant",
+    )
+    host = f"lake.dfs.{suffix}"
+    expected = {
+        f"fs.azure.account.auth.type.{host}": "OAuth",
+        f"fs.azure.account.oauth.provider.type.{host}": (
+            "org.apache.hadoop.fs.azurebfs.oauth2.ClientCredsTokenProvider"
+        ),
+        f"fs.azure.account.oauth2.client.id.{host}": "client",
+        f"fs.azure.account.oauth2.client.secret.{host}": "secret",
+        f"fs.azure.account.oauth2.client.endpoint.{host}": (
+            f"https://{authority}/tenant/oauth2/token"
+        ),
+    }
+    assert engine.apply_storage_credentials(storage) == expected  # type: ignore[arg-type]
+    assert conf.values == expected
+
+
+def test_explicit_adls_shared_key_resets_the_authentication_type() -> None:
+    engine, conf = _credential_engine()
+    storage = _StorageOptions(
+        account_name="lake",
+        endpoint_kind="dfs",
+        endpoint_suffix="core.windows.net",
+        account_key="secret",
+    )
+    expected = {
+        "fs.azure.account.key.lake.dfs.core.windows.net": "secret",
+        "fs.azure.account.auth.type.lake.dfs.core.windows.net": "SharedKey",
+    }
+    assert engine.apply_storage_credentials(storage) == expected  # type: ignore[arg-type]
+    assert conf.values == expected
+
+
+def test_explicit_s3_temporary_and_http_options_are_complete() -> None:
+    engine, conf = _credential_engine()
+    storage = _StorageOptions(
+        aws_access_key_id="key",
+        aws_secret_access_key="secret",
+        aws_session_token="token",
+        aws_endpoint_url="http://localhost:9000",
+        aws_allow_http="true",
+        aws_region="eu-west-1",
+    )
+    applied = engine.apply_storage_credentials(storage)  # type: ignore[arg-type]
+    assert applied["fs.s3a.aws.credentials.provider"].endswith(".TemporaryAWSCredentialsProvider")
+    assert applied["fs.s3a.connection.ssl.enabled"] == "false"
+    assert applied["fs.s3a.endpoint"] == "http://localhost:9000"
+    assert applied["fs.s3a.endpoint.region"] == "eu-west-1"
+    assert conf.values == applied
+
+
+@pytest.mark.parametrize(
+    ("options", "provider"),
+    [
+        (
+            {"aws_access_key_id": "key", "aws_secret_access_key": "secret"},
+            "SimpleAWSCredentialsProvider",
+        ),
+        ({"aws_anonymous": "true"}, "AnonymousAWSCredentialsProvider"),
+    ],
+)
+def test_explicit_s3_provider_does_not_inherit_an_old_session_mode(
+    options: dict[str, str], provider: str
+) -> None:
+    engine, conf = _credential_engine()
+    applied = engine.apply_storage_credentials(_StorageOptions(**options))  # type: ignore[arg-type]
+    assert applied["fs.s3a.aws.credentials.provider"].endswith("." + provider)
+    assert conf.values == applied

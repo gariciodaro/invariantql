@@ -8,12 +8,13 @@ provider SDK; a missing extra surfaces when the adapter is first used.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NoReturn
 
 from invariantql.api.loading import load_adapter
 from invariantql.api.query import Query
 from invariantql.application.registry import Registry
 from invariantql.application.service import DEFAULT_BATCH_SIZE, DEFAULT_PREVIEW_ROWS, QueryService
+from invariantql.domain.diagnostics import MissingDependencyError
 from invariantql.domain.plan import QueryPlan
 from invariantql.ports.engine import ExecutionEngine
 from invariantql.ports.source import DataSource
@@ -25,7 +26,7 @@ _FORMAT_HANDLERS: dict[str, tuple[str, str, str, str | None]] = {
         "invariantql.adapters.formats.xml",
         "XmlLocalHandler",
         "XmlReaderSpecHandler",
-        "duckdb",
+        "xml",
     ),
     "delta": (
         "invariantql.adapters.formats.delta",
@@ -40,6 +41,37 @@ _FORMAT_HANDLERS: dict[str, tuple[str, str, str, str | None]] = {
         "iceberg",
     ),
 }
+
+
+class _UnavailableFormatHandler:
+    """Remember a recognized format whose optional dependency is absent.
+
+    Registering this sentinel lets reachability and schema discovery retain the
+    original, actionable ``MissingDependencyError`` instead of degrading into
+    a generic unsupported-format error on first use.
+    """
+
+    def __init__(self, format_name: str, error: MissingDependencyError) -> None:
+        self.format_name = format_name
+        self._diagnostic = error.diagnostic
+
+    def _raise(self) -> NoReturn:
+        raise MissingDependencyError(
+            self._diagnostic.message,
+            diagnostic=self._diagnostic,
+        ) from None
+
+    def capabilities(self, *_args: Any, **_kwargs: Any) -> NoReturn:
+        self._raise()
+
+    def schema(self, *_args: Any, **_kwargs: Any) -> NoReturn:
+        self._raise()
+
+    def scan(self, *_args: Any, **_kwargs: Any) -> NoReturn:
+        self._raise()
+
+    def reader_spec(self, *_args: Any, **_kwargs: Any) -> NoReturn:
+        self._raise()
 
 
 class Context:
@@ -118,13 +150,14 @@ class Context:
         if register is None:
             return
         wants_local = getattr(engine, "handler_kind", "local") == "local"
-        for module, local_cls, distributed_cls, _extra in _FORMAT_HANDLERS.values():
+        for format_name, (module, local_cls, distributed_cls, extra) in _FORMAT_HANDLERS.items():
             attribute = local_cls if wants_local else distributed_cls
             try:
-                handler_cls = load_adapter(module, attribute, extra=None)
-            except Exception:
-                continue
-            register(handler_cls())
+                handler_cls = load_adapter(module, attribute, extra=extra)
+            except MissingDependencyError as exc:
+                register(_UnavailableFormatHandler(format_name, exc))
+            else:
+                register(handler_cls())
 
     # -- queries ------------------------------------------------------------
 

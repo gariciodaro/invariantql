@@ -26,6 +26,22 @@ class TestLocalStorageContract(StorageContract):
     def missing_path(self) -> str:
         return "dir/missing.csv"
 
+    def test_paths_cannot_escape_the_root(self, storage, tmp_path) -> None:
+        outside = tmp_path.parent / "outside.csv"
+        outside.write_bytes(b"secret")
+        for path in ("../outside.csv", str(outside), iql.Location(str(outside), "file")):
+            with pytest.raises(iql.InvariantQLError) as info:
+                storage.resolve(path)
+            assert info.value.code is iql.DiagnosticCode.STORAGE_UNSUPPORTED_OPERATION
+
+    def test_symlinks_cannot_escape_the_root(self, storage, tmp_path) -> None:
+        outside = tmp_path.parent / "outside-via-link.csv"
+        outside.write_bytes(b"secret")
+        (tmp_path / "escape.csv").symlink_to(outside)
+        with pytest.raises(iql.InvariantQLError) as info:
+            storage.resolve("escape.csv")
+        assert info.value.code is iql.DiagnosticCode.STORAGE_UNSUPPORTED_OPERATION
+
 
 class TestMemoryFsspecStorageContract(StorageContract):
     @pytest.fixture()
@@ -48,6 +64,15 @@ class TestMemoryFsspecStorageContract(StorageContract):
     @pytest.fixture()
     def missing_path(self) -> str:
         return "dir/missing.csv"
+
+    def test_parent_segments_are_rejected(self, storage) -> None:
+        for path in ("../outside.csv", "dir/../../outside.csv"):
+            with pytest.raises(iql.InvariantQLError) as info:
+                storage.resolve(path)
+            assert info.value.code is iql.DiagnosticCode.STORAGE_UNSUPPORTED_OPERATION
+
+    def test_dot_segments_are_normalised(self, storage) -> None:
+        assert storage.resolve("dir/./sample.csv") == storage.resolve("dir/sample.csv")
 
 
 class TestFileSourceContract(SourceContract):
