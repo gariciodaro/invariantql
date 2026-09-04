@@ -2,10 +2,10 @@
 
 ## Purpose
 
-This directory records the architectural intent of InvariantQL before runtime
-implementation begins. It exists to preserve *why* the system is shaped as it
-is, including the forces, rejected alternatives, consequences, and conditions
-that should cause a decision to be revisited.
+This directory records the architectural intent of InvariantQL. It preserves
+*why* the system is shaped as it is, including the forces, rejected
+alternatives, consequences, and conditions that should cause a decision to be
+revisited.
 
 The architecture is a set of trade-offs, not a claim that one structure is
 universally best. Each decision is paired with fitness functions so that the
@@ -46,7 +46,7 @@ ownership of them.
 
 ## Architectural style
 
-InvariantQL will be a modular library using ports and adapters:
+InvariantQL is a modular library using ports and adapters:
 
 - The domain core owns typed schemas, expressions, logical plans, and
   capabilities.
@@ -126,10 +126,14 @@ contract is proven. They may be revisited through new ADRs.
 | [0008](decisions/0008-sync-planning-async-execution.md) | Keep planning synchronous and make async execution explicit | Accepted |
 | [0009](decisions/0009-use-uv.md) | Use uv for dependency and contributor workflows | Accepted |
 | [0010](decisions/0010-optional-integration-boundaries.md) | Isolate optional integrations and defer plugin discovery | Accepted |
+| [0011](decisions/0011-duckdb-local-engine.md) | Use DuckDB as the local execution engine | Accepted |
+| [0012](decisions/0012-first-release-scope.md) | First release scope, supported platforms, and licence | Accepted |
+| [0013](decisions/0013-credential-model.md) | Credentials stay inside adapters as opaque, redacted values | Accepted |
 
 ## Change policy
 
-Architecture documents and ADRs change through review. An accepted ADR is not
-edited to hide a superseded decision; a new ADR supersedes it. Numerical fitness
-thresholds may be calibrated after a measured baseline, but weakening a safety
-or semantic threshold requires an ADR.
+Architecture documents and ADRs change through review. After the first public
+release, a new ADR records and supersedes a changed decision instead of
+rewriting the accepted record. Numerical fitness thresholds may be calibrated
+after a measured baseline, but weakening a safety or semantic threshold
+requires an ADR.

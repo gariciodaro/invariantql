@@ -27,8 +27,11 @@ Arrow-native bounded result. Conversions such as `to_pandas()` are explicit
 terminal materializations with configurable safety limits.
 
 The Spark engine returns a Spark-specific lazy result wrapper or native relation
-through its engine-specific API. Compilation performs no action. Distributed
-collection, writing, and job submission are explicit operations.
+through its engine-specific API. Once the source schema is bound, compilation
+does not collect or write data and the returned DataFrame remains lazy. Schema
+discovery is a separate inspection step and may read metadata or schedule
+format-specific inference work. Distributed collection and writing remain
+explicit operations.
 
 The portable object is the immutable query plan, not the physical result. Code
 that must remain engine-independent builds and inspects plans; code that consumes
@@ -77,7 +80,7 @@ domain types and are verified rather than inferred from native objects.
 ## Fitness functions
 
 - [FF-07: local/Spark portability suite](../fitness-functions.md#ff-07-localspark-portability-suite)
-- [FF-08: no implicit Spark action or collection](../fitness-functions.md#ff-08-no-implicit-spark-action-or-collection)
+- [FF-08: no implicit Spark collection or output action](../fitness-functions.md#ff-08-no-implicit-spark-collection-or-output-action)
 - [FF-10: bounded local memory](../fitness-functions.md#ff-10-bounded-local-memory)
 - [FF-14: explicit staging and collection](../fitness-functions.md#ff-14-explicit-staging-and-collection)
 

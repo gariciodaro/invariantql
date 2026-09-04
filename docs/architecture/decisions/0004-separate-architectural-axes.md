@@ -9,8 +9,8 @@
 A file-backed dataset varies independently by location protocol, object-store
 semantics, serialization format, and execution engine. A database combines
 storage and query behavior behind its native source interface. Treating every
-combination as a connector class leads to products such as
-`SparkAzureCsvConnector` and repeats configuration and logic.
+combination as one compound adapter leads to a class for every
+engine/storage/format permutation and repeats configuration and logic.
 
 At the other extreme, making every object store pretend to be a POSIX
 filesystem hides material differences such as atomic rename, directory
@@ -42,7 +42,7 @@ adapter does not import or switch on another adapter.
 
 ## Alternatives considered
 
-### One connector class per combination
+### One adapter class per combination
 
 This makes construction concrete but causes combinatorial growth and duplicated
 behavior across providers, formats, and engines.
@@ -63,7 +63,7 @@ query operations.
 
 ### Benefits
 
-- Independent variation prevents a connector-class explosion.
+- Independent variation prevents an adapter-class explosion.
 - Storage behavior such as staging and non-atomic moves remains visible.
 - Data-format options are reusable across local and distributed handlers.
 
@@ -76,7 +76,7 @@ query operations.
 
 ## Connascence and cohesion
 
-Composition replaces connascence of identity encoded in compound connector
+Composition replaces connascence of identity encoded in compound adapter
 classes with static connascence of name and type between narrow roles. Storage
 semantics, serialization knowledge, source query behavior, and execution policy
 each remain functionally cohesive. The facade prevents this internal
@@ -94,4 +94,3 @@ decomposition from becoming user ceremony.
 - Real adapters repeatedly require coordinated changes across the same axes,
   showing that the split lowers rather than raises cohesion.
 - The public construction facade cannot hide invalid combinations clearly.
-

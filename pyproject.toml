@@ -1,0 +1,171 @@
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "invariantql"
+version = "0.1.0"
+description = "Explainable, read-only SQL across files, object storage, and databases with DuckDB and Spark."
+readme = { file = "README.md", content-type = "text/markdown" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "Gari Ciodaro Guerra" }]
+keywords = [
+  "sql",
+  "data-exploration",
+  "data-engineering",
+  "query-planning",
+  "duckdb",
+  "spark",
+  "arrow",
+  "pushdown",
+  "data-lake",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Information Technology",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Database",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Typing :: Typed",
+]
+# The base install must import without any provider SDK (FF-02). SQLGlot is a
+# pure-Python parser used only inside the SQL frontend adapter.
+dependencies = [
+  "sqlglot>=25.0",
+]
+
+[project.optional-dependencies]
+# Local execution engine (ADR-0011) and the Arrow result boundary (ADR-0005).
+duckdb = ["duckdb>=1.2", "pyarrow>=16.0", "fsspec>=2024.3"]
+# Bounded local materialisations.
+pandas = ["pandas>=2.0", "pyarrow>=16.0"]
+polars = ["polars>=1.0", "pyarrow>=16.0"]
+# Distributed engine.
+spark = ["pyspark>=3.5,<4.0"]
+# Storage adapters.
+azure = ["adlfs>=2024.4", "azure-identity>=1.15", "azure-storage-blob>=12.19", "fsspec>=2024.3"]
+s3 = ["s3fs>=2024.4", "fsspec>=2024.3"]
+sftp = ["paramiko>=3.5.1", "fsspec>=2024.3"]
+# Native query sources.
+postgres = ["psycopg[binary]>=3.1", "pyarrow>=16.0"]
+mysql = ["pymysql[rsa]>=1.1", "pyarrow>=16.0"]
+mongodb = ["pymongo>=4.6", "pyarrow>=16.0"]
+neo4j = ["neo4j>=5.15", "pyarrow>=16.0"]
+# Table formats that need their own reader library locally.
+xml = ["defusedxml>=0.7", "pyarrow>=16.0"]
+delta = ["deltalake>=0.18", "pyarrow>=16.0"]
+iceberg = ["pyiceberg[pyarrow]>=0.12", "pyarrow>=18.0"]
+all = [
+  "invariantql[duckdb,pandas,polars,spark,azure,s3,sftp,postgres,mysql,mongodb,neo4j,xml,delta,iceberg]",
+]
+
+[project.urls]
+Homepage = "https://github.com/gariciodaro/invariantql"
+Documentation = "https://github.com/gariciodaro/invariantql#readme"
+Repository = "https://github.com/gariciodaro/invariantql"
+Issues = "https://github.com/gariciodaro/invariantql/issues"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.2",
+  "pytest-timeout>=2.3",
+  "hypothesis>=6.100",
+  "ruff>=0.16.6",
+  "pyright>=1.1.380",
+  "import-linter>=2.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/invariantql"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/invariantql", "README.md", "LICENSE", "docs/architecture"]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "architecture: executable architecture fitness functions (FF-01, FF-02, FF-04, FF-11, FF-12, FF-16)",
+  "contract: shared port conformance suites run against adapters (FF-03)",
+  "portability: DuckDB/Spark semantic parity corpus (FF-07)",
+  "spark: needs a JVM and pyspark",
+  "integration: needs a live external service (set INVARIANTQL_INTEGRATION=1)",
+]
+timeout = 600
+filterwarnings = [
+  "error::DeprecationWarning:invariantql.*",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "TID", "RUF"]
+ignore = ["E501", "RUF012"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["invariantql"]
+
+[tool.pyright]
+include = ["src"]
+pythonVersion = "3.10"
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "standard"
+reportMissingImports = "warning"
+reportMissingModuleSource = "none"
+reportPrivateImportUsage = "none"
+
+# FF-01: inward dependency direction, executable through import-linter.
+[tool.importlinter]
+root_package = "invariantql"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Layers point inward: api -> application -> ports -> domain"
+type = "layers"
+layers = [
+  "invariantql.api",
+  "invariantql.application",
+  "invariantql.ports",
+  "invariantql.domain",
+]
+
+[[tool.importlinter.contracts]]
+name = "Core never imports adapters or the facade"
+type = "forbidden"
+source_modules = ["invariantql.domain", "invariantql.ports", "invariantql.application"]
+forbidden_modules = ["invariantql.adapters", "invariantql.api"]
+
+[[tool.importlinter.contracts]]
+name = "Domain, ports and application never import provider libraries"
+type = "forbidden"
+source_modules = ["invariantql.domain", "invariantql.ports", "invariantql.application"]
+forbidden_modules = [
+  "sqlglot", "duckdb", "pyarrow", "pyspark", "pandas", "polars", "fsspec", "adlfs", "s3fs",
+  "paramiko", "azure", "boto3", "botocore", "psycopg", "pymysql", "pymongo", "neo4j",
+  "deltalake", "pyiceberg", "defusedxml",
+]
+
+[[tool.importlinter.contracts]]
+name = "Adapters do not import one another"
+type = "independence"
+modules = [
+  "invariantql.adapters.sql",
+  "invariantql.adapters.duckdb_engine",
+  "invariantql.adapters.spark_engine",
+  "invariantql.adapters.storage",
+  "invariantql.adapters.formats",
+  "invariantql.adapters.sources",
+]

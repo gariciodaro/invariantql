@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+.python-version.local
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+.import_linter_cache/
+
+# Spark / test artefacts
+spark-warehouse/
+metastore_db/
+derby.log
+.tmp/
+
+# Local integration credentials (the adjacent .env.example is safe to track)
+scripts/integration/.env
