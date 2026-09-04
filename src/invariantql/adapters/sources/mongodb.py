@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import functools
+import ipaddress
 import operator
 import re
 import threading
@@ -18,6 +19,7 @@ import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import unquote
 
 import pyarrow as pa
 from bson import Decimal128, ObjectId
@@ -51,7 +53,7 @@ from invariantql.domain.expressions import (
     referenced_columns,
     substitute_parameters,
 )
-from invariantql.domain.redaction import redact_exception
+from invariantql.domain.redaction import redact_exception, register_secret
 from invariantql.domain.schema import Field, Schema
 from invariantql.domain.types import (
     BinaryType,
@@ -76,6 +78,7 @@ if TYPE_CHECKING:
 _KIND = "mongodb"
 _SPARK_CONNECTOR = "org.mongodb.spark:mongo-spark-connector_2.12"
 _UTC = _dt.timezone.utc
+_COSMOS_HOST_SUFFIX = ".cosmos.azure.com"
 
 # Expression kinds whose MongoDB translation matches the portable profile.
 # NOT and ARITHMETIC stay residual: ``$not``/``$ne`` match documents where the
@@ -194,6 +197,11 @@ class MongoDBSource:
       or constant comparisons, ``NULL`` literals) are evaluated in-process on
       the converted rows, before the limit is applied, so the scan still
       honours the full pushed predicate.
+    - Azure Cosmos DB's Mongo API does not support ``find`` collation. Hosts
+      below ``*.cosmos.azure.com`` are detected from the URI, the unsupported
+      option is omitted, and string-literal comparisons, ``IN`` and ``LIKE``
+      are evaluated in-process before ``LIMIT``. Numeric and null predicates
+      remain native; inferred ObjectId equality/``IN`` keeps its BSON coercion.
 
     Spark: :meth:`relation` returns ``NativeRelation('mongodb', ...)``; the
     Spark engine needs the ``org.mongodb.spark:mongo-spark-connector_2.12`` jar.
@@ -227,9 +235,16 @@ class MongoDBSource:
         self._sample_size = int(sample_size)
         self._client: Any = client
         self._owns_client = client is None
+        # Azure Cosmos DB's Mongo API rejects the ``collation`` option on
+        # ``find`` (error code 115).  Without the explicit simple collation we
+        # cannot assume portable case-sensitive string comparison semantics,
+        # so those predicates are rechecked over converted rows below.
+        self._supports_find_collation = not _is_cosmos_mongo_uri(uri)
         self._closed = False
         self._display_uri = _display_uri(uri)
         self._secrets = SecretOptions({"connection.uri": uri}, ref=CredentialRef(f"mongodb:{name}"))
+        for password in _uri_passwords(uri):
+            register_secret(password)
         self._schema: Schema | None = schema
         # Columns whose string literals denote ObjectIds, and columns whose
         # predicates must be evaluated in-process (see the class docstring).
@@ -278,7 +293,8 @@ class MongoDBSource:
             evidence=(
                 "MongoDB find(): projection, limit, $eq/$lt/$lte/$gt/$gte, $in and anchored "
                 "case-sensitive $regex for LIKE; <>, NOT IN and NOT LIKE carry a $ne null guard; "
-                "NOT and arithmetic stay residual because MongoDB negation matches null/missing fields",
+                "NOT and arithmetic stay residual because MongoDB negation matches null/missing fields; "
+                "Cosmos DB endpoints omit unsupported collation and recheck string predicates locally",
             ),
         )
 
@@ -320,7 +336,11 @@ class MongoDBSource:
                 raise ParameterError(
                     f"missing parameter {exc.args[0]!r}", code=DiagnosticCode.PARAMETER_MISSING
                 ) from None
-        translator = _Translator(self._objectid_columns, self._local_columns)
+        translator = _Translator(
+            self._objectid_columns,
+            self._local_columns,
+            force_local_string_predicates=not self._supports_find_collation,
+        )
         native: list[dict[str, Any]] = []
         local: list[Expression] = []
         for conjunct in conjuncts(predicate):
@@ -341,8 +361,9 @@ class MongoDBSource:
         find_options: dict[str, Any] = {
             "projection": projection_document,
             "batch_size": batch_size,
-            "collation": {"locale": "simple"},
         }
+        if self._supports_find_collation:
+            find_options["collation"] = {"locale": "simple"}
         if pushed.limit is not None and not local:
             find_options["limit"] = pushed.limit
 
@@ -526,10 +547,97 @@ def _display_uri(uri: str) -> str:
     """``scheme://hosts`` only: no userinfo, no path, no query options."""
 
     scheme, separator, rest = uri.partition("://")
-    if not separator:
+    if not separator or scheme.lower() not in {"mongodb", "mongodb+srv"}:
         return "<redacted>"
     hosts = rest.split("/", 1)[0].split("?", 1)[0].rsplit("@", 1)[-1]
+    if not _safe_display_hosts(hosts, srv=scheme.lower() == "mongodb+srv"):
+        # URI validation is deliberately lazy.  Do not mistake malformed
+        # ``user:password`` without its trailing ``@`` for ``host:port`` and
+        # echo the apparent password from repr/error-adjacent diagnostics.
+        return "<redacted>"
     return f"{scheme}://{hosts}"
+
+
+def _safe_display_hosts(hosts: str, *, srv: bool) -> bool:
+    """Whether an authority is unambiguously a display-safe Mongo host list."""
+
+    seeds = hosts.split(",")
+    if not hosts or not seeds or (srv and len(seeds) != 1):
+        return False
+    for seed in seeds:
+        seed = seed.strip()
+        if not seed or "@" in seed or any(char.isspace() for char in seed):
+            return False
+        if seed.startswith("["):
+            end = seed.find("]")
+            if end <= 1:
+                return False
+            host = seed[1:end]
+            try:
+                ipaddress.IPv6Address(host)
+            except ValueError:
+                return False
+            remainder = seed[end + 1 :]
+            if not remainder:
+                continue
+            if srv or not remainder.startswith(":") or not _valid_port(remainder[1:]):
+                return False
+            continue
+        if any(char in seed for char in "[]/?#"):
+            return False
+        if ":" not in seed:
+            continue
+        if srv or seed.count(":") != 1:
+            return False
+        host, port = seed.rsplit(":", 1)
+        if not host or not _valid_port(port):
+            return False
+    return True
+
+
+def _valid_port(value: str) -> bool:
+    return 1 <= len(value) <= 5 and value.isascii() and value.isdigit() and 1 <= int(value) <= 65535
+
+
+def _uri_passwords(uri: str) -> tuple[str, ...]:
+    """Encoded and decoded URI password tokens, without validating or resolving hosts."""
+
+    _, separator, rest = uri.partition("://")
+    if not separator:
+        return ()
+    authority = rest.split("/", 1)[0].split("?", 1)[0]
+    if "@" not in authority:
+        return ()
+    userinfo = authority.rsplit("@", 1)[0]
+    if ":" not in userinfo:
+        return ()
+    encoded = userinfo.split(":", 1)[1]
+    decoded = unquote(encoded)
+    return tuple(dict.fromkeys((encoded, decoded)))
+
+
+def _is_cosmos_mongo_uri(uri: str) -> bool:
+    """Whether a Mongo URI targets Azure Cosmos DB's Mongo-compatible API.
+
+    URI userinfo and ports are ignored, host matching is case-insensitive, and
+    every seed in a standard multi-host URI is checked.  Parsing stays local:
+    unlike PyMongo's SRV parser this helper never performs DNS resolution.
+    """
+
+    _, separator, rest = uri.partition("://")
+    if not separator:
+        return False
+    authority = rest.split("/", 1)[0].split("?", 1)[0].rsplit("@", 1)[-1]
+    for seed in authority.split(","):
+        seed = seed.strip()
+        if seed.startswith("["):
+            end = seed.find("]")
+            host = seed[1:end] if end >= 0 else seed
+        else:
+            host = seed.rsplit(":", 1)[0] if ":" in seed else seed
+        if host.rstrip(".").lower().endswith(_COSMOS_HOST_SUFFIX):
+            return True
+    return False
 
 
 # -- schema inference ------------------------------------------------------------
@@ -812,9 +920,16 @@ def like_to_regex(pattern: str) -> str:
 
 
 class _Translator:
-    def __init__(self, objectid_columns: frozenset[str], local_columns: frozenset[str]) -> None:
+    def __init__(
+        self,
+        objectid_columns: frozenset[str],
+        local_columns: frozenset[str],
+        *,
+        force_local_string_predicates: bool = False,
+    ) -> None:
         self._objectid = objectid_columns
         self._local = local_columns
+        self._force_local_strings = force_local_string_predicates
 
     def conjunct(self, expression: Expression) -> dict[str, Any] | None:
         try:
@@ -855,6 +970,12 @@ class _Translator:
             raise _NotNative
         if column in self._local or literal.value is None:
             raise _NotNative
+        if (
+            self._force_local_strings
+            and column not in self._objectid
+            and isinstance(literal.value, str)
+        ):
+            raise _NotNative
         value = self._value(column, literal.value)
         if op is ComparisonOp.NE:
             return {"$and": [{column: {"$ne": value}}, {column: {"$ne": None}}]}
@@ -870,6 +991,12 @@ class _Translator:
                 if expression.negated:
                     raise _NotNative  # NOT IN with a NULL member is never true
                 continue  # a NULL member of IN never matches
+            if (
+                self._force_local_strings
+                and column not in self._objectid
+                and isinstance(item.value, str)
+            ):
+                raise _NotNative
             values.append(self._value(column, item.value))
         if not values:
             raise _NotNative
@@ -879,8 +1006,10 @@ class _Translator:
 
     def _like(self, expression: Like) -> dict[str, Any]:
         column = self._column(expression.operand)
-        if column in self._objectid:
-            raise _NotNative  # $regex never matches ObjectId values
+        if column in self._objectid or self._force_local_strings:
+            # $regex never matches ObjectId values; Cosmos DB cannot accept
+            # the simple collation that guarantees portable string semantics.
+            raise _NotNative
         pattern = expression.pattern
         if not isinstance(pattern, Literal) or not isinstance(pattern.value, str):
             raise _NotNative

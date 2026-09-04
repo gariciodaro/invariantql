@@ -57,6 +57,9 @@ from invariantql.domain.types import (
 
 PASSWORD = "s3cr3t-p4ssw0rd"
 SECRET_URI = f"mongodb://alice:{PASSWORD}@mongo.example.com:27017/app?authSource=admin"
+COSMOS_URI = (
+    f"mongodb://alice:{PASSWORD}@orders.mongo.cosmos.azure.com:10255/app?tls=true&retryWrites=false"
+)
 OID = "5f1d7f3e8a9b0c1d2e3f4a5b"
 UTC = dt.timezone.utc
 
@@ -135,13 +138,14 @@ def make_source(
     *,
     schema: Schema | None = DECLARED,
     fail: Exception | None = None,
+    uri: str = SECRET_URI,
     **options: Any,
 ) -> tuple[MongoDBSource, FakeCollection, FakeClient]:
     collection = FakeCollection(docs, fail=fail)
     client = FakeClient(collection)
     source = MongoDBSource(
         "docs",
-        uri=SECRET_URI,
+        uri=uri,
         database="app",
         collection="orders",
         schema=schema,
@@ -371,6 +375,60 @@ def test_scan_pins_simple_collation_for_portable_string_comparisons() -> None:
         batch_size=8,
     ).close()
     assert collection.calls[-1][1]["collation"] == {"locale": "simple"}
+
+
+def test_cosmos_omits_unsupported_collation_but_keeps_numeric_pushdown() -> None:
+    source, collection, _ = make_source(
+        [{"name": "alice", "qty": 3}],
+        uri=COSMOS_URI,
+    )
+    table = source.scan(
+        PushedOperations(
+            projection=("name",),
+            predicate=Comparison(ComparisonOp.GT, col("qty"), lit(1)),
+            limit=1,
+        ),
+        {},
+        batch_size=8,
+    ).read_all()
+    filter_doc, kwargs = collection.calls[-1]
+    assert filter_doc == {"qty": {"$gt": 1}}
+    assert kwargs == {
+        "projection": {"name": 1, "_id": 0},
+        "batch_size": 8,
+        "limit": 1,
+    }
+    assert table.to_pylist() == [{"name": "alice"}]
+
+
+def test_cosmos_rechecks_string_predicates_before_limit() -> None:
+    source, collection, _ = make_source(
+        [
+            {"name": "Alice", "qty": 3},
+            {"name": "alice", "qty": 4},
+            {"name": "bob", "qty": 5},
+        ],
+        uri=COSMOS_URI,
+    )
+    predicate = And(
+        (
+            Comparison(ComparisonOp.GT, col("qty"), lit(1)),
+            Comparison(ComparisonOp.EQ, col("name"), lit("alice")),
+            In(col("name"), (lit("alice"), lit("bob"))),
+            Like(col("name"), lit("a%")),
+        )
+    )
+    table = source.scan(
+        PushedOperations(projection=("name",), predicate=predicate, limit=1),
+        {},
+        batch_size=8,
+    ).read_all()
+    filter_doc, kwargs = collection.calls[-1]
+    assert filter_doc == {"qty": {"$gt": 1}}
+    assert "collation" not in kwargs
+    assert "limit" not in kwargs
+    assert kwargs["projection"] == {"name": 1, "_id": 0}
+    assert table.to_pylist() == [{"name": "alice"}]
 
 
 def test_limit_zero_returns_empty_stream_without_querying() -> None:
@@ -666,6 +724,43 @@ def test_srv_and_multi_host_uris_are_displayed_without_userinfo() -> None:
     assert PASSWORD not in repr(srv) + repr(multi)
 
 
+def test_repr_preserves_ipv6_and_redacts_malformed_userinfo() -> None:
+    ipv6 = MongoDBSource(
+        "ipv6",
+        uri="mongodb://[2001:db8::1]:27017,[2001:db8::2]/db",
+        database="db",
+        collection="c",
+        client=object(),
+    )
+    malformed = MongoDBSource(
+        "bad",
+        uri="mongodb://alice:S3cretValue123/db",
+        database="db",
+        collection="c",
+        client=object(),
+    )
+    malformed_multi = MongoDBSource(
+        "bad-multi",
+        uri="mongodb://h1:27017,alice:S3cretValue123/db",
+        database="db",
+        collection="c",
+        client=object(),
+    )
+    huge_numeric_password = "1" * 5000
+    malformed_numeric = MongoDBSource(
+        "bad-numeric",
+        uri=f"mongodb://alice:{huge_numeric_password}/db",
+        database="db",
+        collection="c",
+        client=object(),
+    )
+    assert "uri='mongodb://[2001:db8::1]:27017,[2001:db8::2]'" in repr(ipv6)
+    assert "uri='<redacted>'" in repr(malformed)
+    assert "uri='<redacted>'" in repr(malformed_multi)
+    assert "uri='<redacted>'" in repr(malformed_numeric)
+    assert "S3cretValue123" not in repr(malformed) + repr(malformed_multi)
+
+
 def test_provider_errors_are_wrapped_and_redacted() -> None:
     failure = OperationFailure(f"authentication failed for {SECRET_URI} password={PASSWORD}")
     source, _, _ = make_source([{"name": "a"}], fail=failure)
@@ -682,6 +777,21 @@ def test_provider_errors_are_wrapped_and_redacted() -> None:
         inferring.schema()
     assert PASSWORD not in str(info.value)
     assert info.value.code is DiagnosticCode.SOURCE_SCHEMA_UNAVAILABLE
+
+
+def test_bare_encoded_and_decoded_uri_passwords_are_redacted_from_provider_errors() -> None:
+    encoded = "S3cret%40Value123"
+    decoded = "S3cret@Value123"
+    uri = f"mongodb://alice:{encoded}@mongo.example.com/app"
+    failure = OperationFailure(f"authentication failed for {encoded}; decoded token {decoded}")
+    source, _, _ = make_source([{"name": "a"}], uri=uri, fail=failure)
+    stream = source.scan(PushedOperations(projection=("name",)), {}, batch_size=8)
+    with pytest.raises(SourceError) as info:
+        stream.read_all()
+    message = str(info.value)
+    assert encoded not in message
+    assert decoded not in message
+    assert message.count("***") >= 2
 
 
 def test_invalid_uri_fails_at_first_use_with_redacted_message() -> None:
